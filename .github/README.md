@@ -36,10 +36,40 @@
 
 🖥️ __界面配置__：提供图形化配置编辑器，支持脚本链新建、重命名、拖拽排序、显示名称编辑和进程名快捷选择
 
+⏰ __常驻调度__：内置常驻调度进程，按周计划在时间窗内每天自动运行，无需再依赖 Windows 计划任务
+
 
 ## 🛠️ 快速开始
 
 [入门指南](https://onedragon-anything.github.io/tools/zh/script_chainer.html)  
+
+## ⏰ 内置常驻调度
+
+程序内置常驻调度：启动后常驻运行，到点在时间窗内按周计划依次执行对应脚本链，不再需要 Windows 计划任务。
+
+在 `config/run.yml` 中配置：
+
+```yaml
+scheduler_enabled: true      # 是否启用常驻调度
+scheduler_poll_seconds: 30   # 轮询间隔（秒）
+once_per_day: true           # 当日只跑一次；中断后自动补跑
+run_window:
+  start: "04:15"             # 允许运行的时间窗，两端都留空表示不限时间
+  end: "06:15"
+schedule:                    # 星期 -> 脚本链列表
+  monday: [genshin-linr, honkai3-weekly]
+  default: [genshin-linr, genshin-my, zzz-daily]
+```
+
+每天优先使用当天星期对应的列表，没有配置时回退到 `default`。
+
+| 命令 | 说明 |
+| --- | --- |
+| `--daemon` | 启动常驻调度（单实例，重复启动会被拒绝） |
+| `--daemon --wait` | 已有实例在运行时，等待其退出后接管 |
+| `--plan` | 按今日计划执行一次后退出，适合手动补跑 |
+
+当日状态记录在 `config/state/daily_run.yml`：脚本链全部成功记为「已完成」，当日不再重跑；存在失败记为「已中断」，下次轮询自动补跑。脚本链退出码为 0（全部成功）、1（存在失败脚本）、2（配置错误）。
 
 ## ☕ 支持我们
 
