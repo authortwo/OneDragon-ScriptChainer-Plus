@@ -937,6 +937,122 @@ def _guard_lock_screen(on_locked: str) -> int | None:
     return EXIT_LOCKED
 
 
+def _retry_candidates(
+    reporter: RunReporter,
+    script_by_idx: dict[int, ScriptConfig],
+    run_config: RunConfig | None,
+    deadline_hit: bool,
+) -> list[ScriptConfig]:
+    """按 retry 配置挑选本轮需要重跑的脚本。
+
+    只重跑失败的脚本；配置错误与环境故障默认不重跑（重跑也无法恢复）。
+    因截止时间未执行的脚本不再重跑。
+    """
+    if run_config is None or deadline_hit:
+        return []
+    if run_config.retry_max_rounds <= 0:
+        return []
+
+    if not run_config.retry_only_failed:
+        return [script_by_idx[idx] for idx in sorted(script_by_idx)]
+
+    result: list[ScriptConfig] = []
+    for record in reporter.failed_records():
+        if record.verdict == run_verdict.FAIL:
+            pass
+        elif record.verdict == run_verdict.CONFIG_ERROR and not run_config.retry_skip_on_config_error:
+            pass
+        elif record.verdict == run_verdict.ENV_ERROR and not run_config.retry_skip_on_crash:
+            pass
+        else:
+            continue
+        script_config = script_by_idx.get(record.index)
+        if script_config is not None:
+            result.append(script_config)
+    return result
+def _retry_failed_scripts(
+    reporter: RunReporter,
+    script_by_idx: dict[int, ScriptConfig],
+    ctx: ScriptChainerContext | None,
+    chain_name: str,
+    privacy_screen: PrivacyScreen,
+    deadline_at: float | None,
+    run_config: RunConfig | None,
+    deadline_hit: bool,
+) -> tuple[bool, bool]:
+    """按配置对失败的脚本做脚本级重跑（不是整链重跑）。
+
+    Returns:
+        (是否有脚本最终仍失败, 是否因到达截止时间中止)
+    """
+    candidates = _retry_candidates(reporter, script_by_idx, run_config, deadline_hit)
+    if not candidates or run_config is None:
+        return _has_failed_records(reporter), False
+
+    max_rounds = run_config.retry_max_rounds
+    delay = run_config.retry_delay_seconds
+    deadline_reached = False
+
+    for round_no in range(1, max_rounds + 1):
+        if deadline_at is not None and time.time() >= deadline_at:
+            deadline_reached = True
+            break
+        if not candidates:
+            break
+
+        names = '、'.join(script.script_display_name for script in candidates)
+        print_message(f'第 {round_no}/{max_rounds} 轮重跑失败脚本：{names}', level='INFO')
+        if delay > 0:
+            print_message(f'{delay} 秒后开始重跑')
+            if _exit_controller.wait(delay):
+                break
+
+        for script_config in candidates:
+            if deadline_at is not None and time.time() >= deadline_at:
+                deadline_reached = True
+                break
+
+            reporter.script_started(
+                script_config.idx,
+                script_config.script_display_name,
+                script_config.script_path,
+            )
+            try:
+                outcome = _run_script_in_group(
+                    script_config, None, ctx, chain_name,
+                    privacy_screen=privacy_screen,
+                    deadline_at=deadline_at,
+                )
+            except _DeadlineReachedError:
+                reporter.script_retried(
+                    script_config.idx,
+                    run_verdict.ScriptOutcome(
+                        run_verdict.FAIL,
+                        end_reason=run_verdict.END_REASON_DEADLINE,
+                        error_summary='到达全局截止时间，重跑被终止',
+                        retry_round=round_no,
+                    ),
+                )
+                deadline_reached = True
+                break
+            outcome.retry_round = round_no
+            reporter.script_retried(script_config.idx, outcome)
+
+        if deadline_reached:
+            break
+        candidates = _retry_candidates(reporter, script_by_idx, run_config, deadline_reached)
+
+    return _has_failed_records(reporter), deadline_reached
+
+
+def _has_failed_records(reporter: RunReporter) -> bool:
+    """是否仍有失败脚本（未执行的 missing 不计入，由截止/中断单独表达）。"""
+    return any(
+        not run_verdict.is_ok(record.verdict) and record.verdict != run_verdict.MISSING
+        for record in reporter.records
+    )
+
+
 def _get_privacy_screen_close_key() -> str:
     """读取隐私屏开关热键的主键，读取失败时用默认值，避免影响脚本链。"""
     try:
@@ -1144,6 +1260,23 @@ def run_chain(
                 print_message('到达全局截止时间，已停止执行后续脚本', level='ERROR')
             else:
                 print_message('已完成调试脚本' if debug_index is not None else '已完成全部脚本')
+
+            script_by_idx = {script.idx: script for script in all_scripts}
+            still_failed, retry_deadline = _retry_failed_scripts(
+                reporter, script_by_idx, ctx, chain_name, privacy_screen,
+                deadline_at, run_config, deadline_hit,
+            )
+            if retry_deadline:
+                deadline_hit = True
+                exit_code = EXIT_DEADLINE
+                print_message('重跑过程中到达全局截止时间，已停止', level='ERROR')
+            elif still_failed:
+                if exit_code == EXIT_OK:
+                    exit_code = EXIT_SCRIPT_FAILED
+            elif exit_code == EXIT_SCRIPT_FAILED:
+                # 重跑后已无失败脚本，恢复为全部成功
+                exit_code = EXIT_OK
+
             reporter.chain_finished(exit_code, deadline_hit=deadline_hit)
             summary = reporter.describe()
             if summary:

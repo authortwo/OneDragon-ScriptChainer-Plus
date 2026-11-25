@@ -1,0 +1,2 @@
+{"ts": "2026-11-25T18:38:08", "event": "chain_start", "chain": "not-exist-chain"}
+{"ts": "2026-11-25T18:38:08", "event": "chain_end", "chain": "not-exist-chain", "exit_code": 2, "deadline_hit": false, "summary": {"ok": 0, "fail": 0, "config_error": 0, "env_error": 0, "missing": 0, "total": 0}}

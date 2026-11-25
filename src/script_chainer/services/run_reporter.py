@@ -175,9 +175,48 @@ class RunReporter:
         self._emit({'event': 'script_end', 'chain': self.chain_name, **record.to_dict()})
         return record
 
+    def script_retried(self, index: int, outcome: run_verdict.ScriptOutcome) -> ScriptRecord | None:
+        """记录脚本重跑结果，用重跑结果覆盖该下标的既有记录。"""
+        pending = self._pending.pop(index, None)
+        target: ScriptRecord | None = None
+        for record in reversed(self.records):
+            if record.index == index:
+                target = record
+                break
+
+        now_ts = time.time()
+        started_at = target.started_at if target is not None else (
+            pending.started_at if pending is not None else _now_text()
+        )
+        record = ScriptRecord(
+            index=index,
+            display_name=target.display_name if target is not None else (pending.display_name if pending else ''),
+            script_path=target.script_path if target is not None else (pending.script_path if pending else ''),
+            started_at=started_at,
+            ended_at=_now_text(),
+            duration_sec=target.duration_sec if target is not None else 0.0,
+            verdict=outcome.verdict,
+            end_reason=outcome.end_reason,
+            error_summary=outcome.error_summary,
+            retry_round=outcome.retry_round,
+        )
+        if target is not None:
+            self.records[self.records.index(target)] = record
+        else:
+            self.records.append(record)
+        self._emit({'event': 'script_end', 'chain': self.chain_name, **record.to_dict()})
+        return record
+
     def finished_indices(self) -> set[int]:
         """已记录的脚本下标集合。"""
         return {record.index for record in self.records}
+
+    def failed_records(self) -> list[ScriptRecord]:
+        """当前仍为失败状态的脚本记录。"""
+        return [
+            record for record in self.records
+            if record.verdict in (run_verdict.FAIL, run_verdict.MISSING)
+        ]
 
     def chain_finished(self, exit_code: int, deadline_hit: bool = False) -> dict:
         """记录链结束，写出汇总报告并返回报告内容。"""

@@ -25,6 +25,9 @@ DEFAULT_POLL_SECONDS = 30
 DEFAULT_DEADLINE_MINUTES = 210
 """单次计划的默认全局截止时间（分钟），0 表示不限。"""
 
+DEFAULT_RETRY_MAX_ROUNDS = 2
+DEFAULT_RETRY_DELAY_SECONDS = 60
+
 LOCK_POLICIES: tuple[str, ...] = ('abort', 'reboot', 'wait')
 """检测到锁屏时的处理策略：abort 跳过、reboot 重启一次、wait 等待解锁。"""
 
@@ -125,6 +128,50 @@ class RunConfig(YamlConfig):
         """检测到锁屏时的处理策略，非法值一律按 abort 处理。"""
         value = str(self.get('on_locked', 'abort')).strip().lower()
         return value if value in LOCK_POLICIES else 'abort'
+
+    @property
+    def retry_max_rounds(self) -> int:
+        """失败脚本的重跑轮数，0 表示不重跑。"""
+        raw = self.get('retry', None)
+        value = raw.get('max_rounds', DEFAULT_RETRY_MAX_ROUNDS) if isinstance(raw, dict) else DEFAULT_RETRY_MAX_ROUNDS
+        try:
+            return max(0, int(value))
+        except (TypeError, ValueError):
+            return DEFAULT_RETRY_MAX_ROUNDS
+
+    @property
+    def retry_delay_seconds(self) -> int:
+        """每轮重跑前的等待时间（秒）。"""
+        raw = self.get('retry', None)
+        value = raw.get('delay_seconds', DEFAULT_RETRY_DELAY_SECONDS) if isinstance(raw, dict) else DEFAULT_RETRY_DELAY_SECONDS
+        try:
+            return max(0, int(value))
+        except (TypeError, ValueError):
+            return DEFAULT_RETRY_DELAY_SECONDS
+
+    @property
+    def retry_only_failed(self) -> bool:
+        """是否只重跑失败的脚本（关闭时整链重跑）。"""
+        raw = self.get('retry', None)
+        if not isinstance(raw, dict):
+            return True
+        return raw.get('only_failed', True) is not False
+
+    @property
+    def retry_skip_on_config_error(self) -> bool:
+        """配置错误是否跳过重跑。"""
+        raw = self.get('retry', None)
+        if not isinstance(raw, dict):
+            return True
+        return raw.get('skip_on_config_error', True) is not False
+
+    @property
+    def retry_skip_on_crash(self) -> bool:
+        """环境故障/启动即崩是否跳过重跑。"""
+        raw = self.get('retry', None)
+        if not isinstance(raw, dict):
+            return True
+        return raw.get('skip_on_crash', True) is not False
 
     @property
     def autostart_enabled(self) -> bool:

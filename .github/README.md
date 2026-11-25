@@ -56,6 +56,12 @@ once_per_day: true           # 当日只跑一次；中断后自动补跑
 autostart_enabled: false     # 随系统登录自动启动常驻调度
 deadline_minutes: 210        # 全局截止时间（分钟），0 表示不限
 on_locked: abort             # 检测到锁屏时：abort 跳过 / reboot 重启一次 / wait 等待解锁
+retry:                       # 失败脚本的脚本级重跑
+  max_rounds: 2              # 最多重跑轮数，0 表示不重跑
+  delay_seconds: 60          # 每轮开始前的等待时间
+  only_failed: true          # 只重跑失败脚本；false 时整链重跑
+  skip_on_config_error: true # 配置错误不重跑
+  skip_on_crash: true        # 环境故障/启动即崩不重跑
 run_window:
   start: "04:15"             # 允许运行的时间窗，两端都留空表示不限时间
   end: "06:15"
@@ -119,6 +125,15 @@ schedule:                    # 星期 -> 脚本链列表
 - 报告中 `summary` 给出各分类计数，`scripts` 列出每个脚本的下标、耗时、结果与错误摘要；因截止时间或中断未执行的脚本记为 `missing`。
 
 文本日志保持原样，仍可沿用旧的日志解析方式。
+
+### 失败脚本级重跑
+
+整链跑完后，按 `retry` 配置只重跑失败的脚本，不会让已成功的脚本再跑一遍：
+
+- 只重跑 `fail` 的脚本；`config_error`、`env_error` 默认不重跑（重跑无法恢复）。
+- `only_failed: false` 时整链重跑。
+- 重跑结果覆盖报告中该下标的记录，`retry_round` 标记最终是第几轮的结果。
+- 重跑过程中到达全局截止时间会立即停止，退出码仍为 3。
 
 ## ☕ 支持我们
 
