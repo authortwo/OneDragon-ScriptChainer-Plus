@@ -5,7 +5,11 @@ import sys
 import pyuac
 
 from one_dragon.launcher.exe_launcher import ExeLauncher
+from one_dragon.utils import os_utils
 from one_dragon.version import __version__
+
+EXIT_ELEVATION_FAILED = 6
+"""提权失败：用户取消 UAC 确认或系统拒绝，管理员进程未启动。"""
 
 
 class ScriptChainerLauncher(ExeLauncher):
@@ -106,6 +110,44 @@ class ScriptChainerLauncher(ExeLauncher):
         if hwnd:
             ctypes.windll.user32.ShowWindow(hwnd, 0)  # SW_HIDE
 
+    @staticmethod
+    def _elevated_command() -> list[str]:
+        """构造提权后重新执行的命令行。
+
+        提权由 ShellExecuteEx 拉起，新进程不继承 PYTHONPATH 与工作目录，
+        因此源码模式改用 `-c` 引导：显式把 src 加入 `sys.path` 并还原参数，
+        避免提权后因找不到模块而直接退出。
+        """
+        if getattr(sys, 'frozen', False):
+            return [sys.executable, *sys.argv[1:]]
+
+        src_dir = os_utils.get_path_under_work_dir('src')
+        bootstrap = (
+            'import sys;'
+            f'sys.path.insert(0, {src_dir!r});'
+            f'sys.argv = {list(sys.argv)!r};'
+            'from script_chainer.win_exe.launcher import main;'
+            'main()'
+        )
+        return [sys.executable, '-c', bootstrap]
+
+    def elevate(self, wait: bool) -> None:
+        """以管理员权限重新执行当前命令行。
+
+        Args:
+            wait: 是否等待提权后的进程结束并沿用其退出码；一次性任务必须等待，
+                否则父进程会在结果未知时就报成功。
+        """
+        try:
+            exit_code = pyuac.runAsAdmin(self._elevated_command(), wait=wait)
+        except Exception as e:
+            print(f'错误：申请管理员权限失败（UAC 确认可能被取消）：{e}')
+            sys.exit(EXIT_ELEVATION_FAILED)
+
+        if not wait:
+            sys.exit(0)
+        sys.exit(exit_code if exit_code is not None else EXIT_ELEVATION_FAILED)
+
     def run_gui_mode(self) -> None:
         """启动新版 Web GUI（FastAPI + React + pywebview）。"""
         self._hide_console()
@@ -175,9 +217,18 @@ class ScriptChainerLauncher(ExeLauncher):
         if args.replay is not None:
             self.run_replay_mode()
 
+        if not args.onedragon and args.shutdown:
+            print("错误：参数 --shutdown 只能在指定 --onedragon 时使用")
+            sys.exit(1)
+
+        # 一次性任务需要拿到真实退出码，提权后必须等待；
+        # 常驻调度与 GUI 是长驻进程，提权后立即返回，不阻塞父进程。
+        one_shot = args.plan or args.run_now or args.onedragon
+
         if not pyuac.isUserAdmin():
-            pyuac.runAsAdmin(sys.argv, wait=False)
-            sys.exit(0)
+            # UAC 被取消时 ShellExecuteEx 会同步抛错，统一转为退出码 6，
+            # 避免父进程在什么都没启动的情况下报成功。
+            self.elevate(wait=one_shot)
 
         if args.daemon or args.plan or args.run_now:
             from script_chainer.win_exe.scheduler_daemon import run_daemon, run_plan_cli
@@ -188,10 +239,6 @@ class ScriptChainerLauncher(ExeLauncher):
                 ignore_window=args.run_now,
                 ignore_once_per_day=args.run_now,
             ))
-
-        if not args.onedragon and args.shutdown:
-            print("错误：参数 --shutdown 只能在指定 --onedragon 时使用")
-            sys.exit(1)
 
         if args.onedragon:
             launch_args = self.build_launch_args(args)
