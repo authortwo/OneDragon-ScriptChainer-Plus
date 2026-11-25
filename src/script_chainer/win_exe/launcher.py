@@ -107,11 +107,11 @@ class ScriptChainerLauncher(ExeLauncher):
             ctypes.windll.user32.ShowWindow(hwnd, 0)  # SW_HIDE
 
     def run_gui_mode(self) -> None:
-        """启动 GUI 配置编辑器"""
+        """启动新版 Web GUI（FastAPI + React + pywebview）。"""
         self._hide_console()
 
-        from script_chainer.win_exe.config_editor import run_editor
-        run_editor()
+        from script_chainer.webui.app import run_webui
+        sys.exit(run_webui())
 
     def run_onedragon_mode(self, launch_args) -> None:
         """运行脚本链"""

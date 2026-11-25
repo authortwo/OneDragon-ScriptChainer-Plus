@@ -556,9 +556,21 @@ class RepoConfig(YamlConfig):
         """按源 ID 查找资源下载源。"""
         return self._resource_sources_by_id.get(source_id)
 
+    @classmethod
+    def _normalize_language(cls, language: str | None) -> str | None:
+        """把 cn / zh_CN / zh-Hans 等写法归一到推荐表使用的 zh / en。"""
+        if not language:
+            return None
+        key = str(language).strip().lower().replace('_', '-')
+        if key == 'cn' or key.startswith('zh'):
+            return 'zh'
+        if key.startswith('en'):
+            return 'en'
+        return key
+
     def get_recommended_resource_source(self, language: str) -> str | None:
         """按语言获取推荐的资源下载源 ID。"""
-        return self.resource_recommend.get(language)
+        return self.resource_recommend.get(self._normalize_language(language))
 
     def get_model_resource(
         self,
@@ -647,7 +659,7 @@ class RepoConfig(YamlConfig):
             _add(user_choice)
         _add(last_success)
         if language:
-            _add(self.resource_recommend.get(language))
+            _add(self.resource_recommend.get(self._normalize_language(language)))
         for source in self.resource_sources:
             _add(source.source_id)
         return candidates

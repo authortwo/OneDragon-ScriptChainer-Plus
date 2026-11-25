@@ -34,7 +34,7 @@
 
 🧹 __进程管理__：统一启动器管理运行流程，退出或中断时会尽量清理已追踪的子进程，减少残留进程
 
-🖥️ __界面配置__：提供图形化配置编辑器，支持脚本链新建、重命名、拖拽排序、显示名称编辑和进程名快捷选择
+🖥️ __界面配置__：新版 Web 界面（FastAPI + React + pywebview）集中管理脚本链、调度、运行策略、报告与推送
 
 ⏰ __常驻调度__：内置常驻调度进程，按周计划在时间窗内每天自动运行，无需再依赖 Windows 计划任务
 
@@ -42,6 +42,37 @@
 ## 🛠️ 快速开始
 
 [入门指南](https://onedragon-anything.github.io/tools/zh/script_chainer.html)  
+
+## 🖥️ Web 界面
+
+新版界面由 FastAPI + React + pywebview 组成：
+
+- 后端：`src/script_chainer/webui/server.py`，只复用配置与状态模块，不加载 PySide6 / cv2；
+- 前端：`src/script_chainer/webui/web/`，React + htm 渲染，静态资源全部本地化，可离线运行；
+- 桌面壳：`src/script_chainer/webui/app.py`，启动本地 uvicorn 后用系统 WebView2 打开窗口。
+
+直接双击程序（无参数）即进入 Web 界面。也可以单独启动：
+
+```bash
+# 桌面窗口
+python -m script_chainer.webui.app
+
+# 仅起服务并用系统浏览器打开（无 WebView2 的环境）
+python -m script_chainer.webui.app --browser
+```
+
+界面包含 6 个页面：
+
+| 页面 | 能力 |
+| --- | --- |
+| 脚本链 | 新建/删除链，增删脚本、排序、启用开关、编辑路径/游戏/检查完成方式/超时，运行整链或调试单个脚本 |
+| 调度 | 周一到周日 + 默认的多选配置，直接写入 `config/run.yml` 的 `schedule`；一键立即补跑今日计划 |
+| 运行策略 | 时间窗、全局截止、轮询间隔、锁屏处理、重试、唤醒、关机、账户校验、开机自启 |
+| 运行报告 | 最近一次运行的汇总、脚本明细、文本报告与日志尾部 |
+| 推送 | 通知标题、启用推送、启动前通知 |
+| 设置 | 代码主仓库与资源下载源，展示当前候选顺序与运行状态 |
+
+后端依赖 `fastapi`、`uvicorn`、`pywebview`，已写入 `pyproject.toml`；`pywebview` 在 Windows 上使用系统 WebView2 运行时。
 
 ## ⏰ 内置常驻调度
 
