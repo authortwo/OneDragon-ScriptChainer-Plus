@@ -11,6 +11,7 @@ __pycache__/
 # 运行过程文件
 .log/
 config/script_chain/
+config/state/
 config/custom.yml
 config/push.yml
 config/env.yml
