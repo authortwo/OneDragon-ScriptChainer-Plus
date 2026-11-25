@@ -85,6 +85,10 @@ class DailyRunState:
         if status in _TERMINAL_STATUSES and once_per_day:
             return False, f'今日{STATUS_LABELS[status]}'
         if status == STATUS_RUNNING:
+            recorded_boot = data.get('boot_time')
+            if isinstance(recorded_boot, (int, float)) and abs(recorded_boot - _boot_time()) > 60:
+                # 系统重启过，上次的「运行中」已经不存在，按中断补跑
+                return True, '上次运行因重启中断，补跑'
             pid = data.get('pid')
             if isinstance(pid, int) and _pid_alive(pid):
                 return False, f'已有实例在运行 (pid={pid})'
@@ -98,6 +102,7 @@ class DailyRunState:
             'date': date.isoformat(),
             'status': STATUS_RUNNING,
             'pid': os.getpid(),
+            'boot_time': _boot_time(),
             'chains': list(chains),
             'started_at': _now_text(),
             'finished_at': None,
@@ -150,3 +155,11 @@ def _pid_alive(pid: int) -> bool:
         return proc.is_running() and proc.status() != psutil.STATUS_ZOMBIE
     except (psutil.NoSuchProcess, psutil.AccessDenied, ValueError):
         return False
+
+
+def _boot_time() -> float:
+    """系统启动时间戳，用于识别「运行中」记录是否已被重启打断。"""
+    try:
+        return psutil.boot_time()
+    except Exception:
+        return 0.0

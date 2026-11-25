@@ -53,6 +53,13 @@ class RunWindow:
     def describe(self) -> str:
         return f'{self.start:%H:%M}-{self.end:%H:%M}'
 
+    def next_end(self, moment: datetime.datetime) -> datetime.datetime:
+        """从给定时刻起，最近一次时间窗结束的时刻（用于把本轮限制在窗内）。"""
+        candidate = datetime.datetime.combine(moment.date(), self.end)
+        if self.crosses_midnight and moment.time() >= self.start:
+            return candidate + datetime.timedelta(days=1)
+        return candidate
+
 
 def _parse_time(value: object, field_name: str) -> datetime.time | None:
     """解析 HH:MM 格式的时间，空值返回 None。"""

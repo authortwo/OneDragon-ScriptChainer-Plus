@@ -56,7 +56,12 @@ class ScriptChainerLauncher(ExeLauncher):
         parser.add_argument(
             "--wait",
             action="store_true",
-            help="常驻调度已有实例在运行时，等待其退出后接管",
+            help="已有运行实例在运行时，等待其退出后接管",
+        )
+        parser.add_argument(
+            "--fail-fast",
+            action="store_true",
+            help="已有运行实例在运行时立即退出，并打印持有者 PID（退出码 5）",
         )
         parser.add_argument(
             "--autostart",
@@ -119,6 +124,8 @@ class ScriptChainerLauncher(ExeLauncher):
             deadline_at=self.args.deadline_at if self.args else None,
             report_json=self.args.report_json if self.args else None,
             report_text=self.args.report_text if self.args else None,
+            wait=self.args.wait if self.args else False,
+            fail_fast=self.args.fail_fast if self.args else False,
         )
         sys.exit(exit_code)
 
@@ -168,11 +175,11 @@ class ScriptChainerLauncher(ExeLauncher):
             sys.exit(0)
 
         if args.daemon or args.plan:
-            from script_chainer.win_exe.scheduler_daemon import run_daemon, run_plan_once
+            from script_chainer.win_exe.scheduler_daemon import run_daemon, run_plan_cli
 
             if args.daemon:
-                sys.exit(run_daemon(wait=args.wait))
-            sys.exit(run_plan_once())
+                sys.exit(run_daemon(wait=args.wait, fail_fast=args.fail_fast))
+            sys.exit(run_plan_cli())
 
         if not args.onedragon and args.shutdown:
             print("错误：参数 --shutdown 只能在指定 --onedragon 时使用")

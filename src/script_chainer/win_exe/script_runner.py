@@ -29,6 +29,7 @@ from script_chainer.config.script_config import (
 from script_chainer.context.script_chainer_context import ScriptChainerContext
 from script_chainer.services import run_verdict
 from script_chainer.services.chain_schedule import list_available_chains
+from script_chainer.services.single_instance import SingleInstanceLock
 from script_chainer.services.log_notifier import LogNotifier
 from script_chainer.services.run_reporter import RunReporter
 from script_chainer.services.script_rules import LogRuleMonitor, parse_fail_fast, parse_stall
@@ -63,6 +64,8 @@ EXIT_SCRIPT_FAILED = 1
 EXIT_CONFIG_ERROR = 2
 EXIT_DEADLINE = 3
 EXIT_LOCKED = 4
+EXIT_ALREADY_RUNNING = 5
+"""已有运行实例且按策略未等待，本次未启动。"""
 
 _ERROR_LINE_PATTERN = re.compile(
     r'\[(?:ERROR|ERR|FTL|FATAL|CRITICAL)\]|Traceback \(most recent call last\)|'
@@ -186,6 +189,8 @@ def parse_args():
     parser.add_argument('--report-json', type=str, default=None, help='运行报告 JSON 输出路径')
     parser.add_argument('--report-text', type=str, default=None, help='运行报告文本输出路径')
     parser.add_argument('--replay', type=str, default=None, help='离线回放历史日志，用同一套规则重新判定')
+    parser.add_argument('--wait', action='store_true', help='已有运行实例在运行时，等待其退出后接管')
+    parser.add_argument('--fail-fast', action='store_true', help='已有运行实例在运行时立即退出并打印持有者 PID')
 
     return parser.parse_args()
 
@@ -1174,6 +1179,8 @@ def run_chain(
     deadline_at: float | None = None,
     report_json: str | None = None,
     report_text: str | None = None,
+    wait: bool = False,
+    fail_fast: bool = False,
 ) -> int:
     """运行指定的脚本链。
 
@@ -1185,10 +1192,12 @@ def run_chain(
         deadline_at: 全局截止时间戳（秒），由常驻调度传入；None 时按 deadline_minutes 自行计算。
         report_json: 汇总报告输出路径，None 时写入 `config/state/last-report.json`。
         report_text: 文本报告输出路径，None 时写入 `config/state/last-report.txt`。
+        wait: 已有运行实例在运行时，等待其退出后接管。
+        fail_fast: 已有运行实例在运行时立即退出（退出码 5），不等待。
 
     Returns:
         0 表示全部脚本成功；1 表示存在失败脚本；2 表示配置错误；
-        3 表示到达全局截止时间；4 表示锁屏阻断。
+        3 表示到达全局截止时间；4 表示锁屏阻断；5 表示已有运行实例。
     """
     _exit_controller.reset()
     configure_runner_runtime_logging()
@@ -1199,6 +1208,39 @@ def run_chain(
 
     init(autoreset=True)
 
+    # 单实例互斥：同一时间只允许一个 Runner 操作桌面与游戏
+    lock = SingleInstanceLock('chain_runner')
+    if not lock.acquire(wait_seconds=None if wait else 0):
+        holder = lock.describe_holder()
+        if fail_fast:
+            print_message(f'已存在运行实例（{holder}），按 --fail-fast 立即退出', 'ERROR')
+        else:
+            print_message(f'已存在运行实例（{holder}），本次不启动', 'ERROR')
+            print_message('可加 --wait 等待其结束')
+        return EXIT_ALREADY_RUNNING
+
+    try:
+        return _run_chain_locked(
+            chain_name=chain_name,
+            shutdown_delay=shutdown_delay,
+            debug_index=debug_index,
+            deadline_at=deadline_at,
+            report_json=report_json,
+            report_text=report_text,
+        )
+    finally:
+        lock.release()
+
+
+def _run_chain_locked(
+    chain_name: str,
+    shutdown_delay: int = 0,
+    debug_index: int | None = None,
+    deadline_at: float | None = None,
+    report_json: str | None = None,
+    report_text: str | None = None,
+) -> int:
+    """已持有单实例锁后执行脚本链。"""
     run_config: RunConfig | None
     try:
         run_config = RunConfig()
@@ -1422,6 +1464,8 @@ def run():
         deadline_at=args.deadline_at,
         report_json=args.report_json,
         report_text=args.report_text,
+        wait=args.wait,
+        fail_fast=args.fail_fast,
     )
     sys.exit(exit_code)
 

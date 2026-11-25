@@ -24,6 +24,8 @@ EXIT_RUN_FAILED = 1
 EXIT_CONFIG_ERROR = 2
 EXIT_DEADLINE = 3
 EXIT_LOCKED = 4
+EXIT_ALREADY_RUNNING = 5
+"""已存在调度实例且按策略未等待，本次未启动。"""
 
 _WEEKDAY_NAMES = ('周一', '周二', '周三', '周四', '周五', '周六', '周日')
 
@@ -231,6 +233,109 @@ def run_plan_once(
     return exit_code
 
 
+def _round_deadline(
+    run_config: RunConfig,
+    window,
+    now: datetime.datetime,
+) -> float | None:
+    """本轮截止时间戳：取全局截止与时间窗结束中较早的一个。
+
+    Returns:
+        None 表示既不限全局时长也不限时间窗。
+    """
+    candidates: list[float] = []
+    if run_config.deadline_minutes > 0:
+        candidates.append(time.time() + run_config.deadline_minutes * 60)
+    if window is not None:
+        candidates.append(window.next_end(now).timestamp())
+    if not candidates:
+        return None
+
+    deadline_at = min(candidates)
+    log_line(
+        '本轮截止时间：'
+        + datetime.datetime.fromtimestamp(deadline_at).strftime('%Y-%m-%d %H:%M:%S')
+    )
+    return deadline_at
+
+
+def _acquire_lock(
+    lock: SingleInstanceLock,
+    wait: bool,
+    fail_fast: bool,
+    purpose: str,
+) -> int | None:
+    """获取单实例锁。
+
+    Args:
+        wait: 已有实例在运行时是否等待其退出后接管。
+        fail_fast: 不等待，立即退出并返回 EXIT_ALREADY_RUNNING。
+        purpose: 日志里的用途说明。
+
+    Returns:
+        None 表示已拿到锁；否则为应立即返回的退出码。
+    """
+    if lock.acquire(wait_seconds=None if wait else 0):
+        return None
+
+    holder = lock.describe_holder()
+    if fail_fast:
+        log_line(f'已存在{purpose}（{holder}），按 --fail-fast 立即退出', level='ERROR')
+        return EXIT_ALREADY_RUNNING
+
+    log_line(f'已存在{purpose}（{holder}），本次不启动')
+    return EXIT_OK
+
+
+def run_plan_cli(run_config: RunConfig | None = None) -> int:
+    """`--plan` 入口：按今日周计划执行一次，尊重时间窗与每日一次。
+
+    时间窗外或今日已完成时直接退出（退出码 0 并输出一行说明）。
+    实际互斥由每条链的 Runner 单实例锁保证。
+    """
+    run_config = run_config or RunConfig()
+
+    try:
+        window = run_config.run_window
+    except ValueError as e:
+        log_line(f'时间窗配置不合法: {e}', level='ERROR')
+        return EXIT_CONFIG_ERROR
+
+    now = datetime.datetime.now()
+    today = now.date()
+    if window is not None and not window.contains(now):
+        log_line(f'当前不在时间窗 {window.describe()} 内，跳过本次执行')
+        return EXIT_OK
+
+    state = DailyRunState()
+    should_start, reason = state.should_start(today, run_config.once_per_day)
+    if not should_start:
+        log_line(f'{today.isoformat()} {reason}，跳过本次执行')
+        return EXIT_OK
+
+    try:
+        chains = resolve_chains_for_date(run_config, today)
+    except ValueError as e:
+        log_line(f'周计划配置不合法: {e}', level='ERROR')
+        return EXIT_CONFIG_ERROR
+    if not chains:
+        log_line(f'{today.isoformat()} 没有配置脚本链，跳过本次执行')
+        return EXIT_OK
+
+    state.mark_running(today, chains)
+    started_at = _now()
+    exit_code = EXIT_CONFIG_ERROR
+    try:
+        exit_code = run_plan_once(
+            run_config, today, deadline_at=_round_deadline(run_config, window, now),
+        )
+    except Exception as e:  # 单次执行异常不应吞掉退出码
+        log_line(f'本轮执行异常: {e}', level='ERROR')
+    finally:
+        state.mark_finished(today, chains, exit_code, started_at=started_at)
+    return exit_code
+
+
 def _shutdown_if_configured(run_config: RunConfig) -> bool:
     """计划跑完后按配置关机。
 
@@ -246,11 +351,12 @@ def _shutdown_if_configured(run_config: RunConfig) -> bool:
     return True
 
 
-def run_daemon(wait: bool = False) -> int:
+def run_daemon(wait: bool = False, fail_fast: bool = False) -> int:
     """常驻调度主循环：在时间窗内按周计划每天触发一次。
 
     Args:
         wait: 已有实例在运行时是否等待其退出后接管。
+        fail_fast: 已有实例在运行时立即退出，返回 EXIT_ALREADY_RUNNING。
     """
     run_config = RunConfig()
 
@@ -271,9 +377,9 @@ def run_daemon(wait: bool = False) -> int:
         return EXIT_CONFIG_ERROR
 
     lock = SingleInstanceLock()
-    if not lock.acquire(wait_seconds=60 if wait else 0):
-        log_line(f'已存在调度实例（{lock.describe_holder()}），本次不启动')
-        return EXIT_OK
+    lock_exit = _acquire_lock(lock, wait, fail_fast, '调度实例')
+    if lock_exit is not None:
+        return lock_exit
 
     state = DailyRunState()
     poll_seconds = run_config.scheduler_poll_seconds
@@ -324,7 +430,10 @@ def run_daemon(wait: bool = False) -> int:
             started_at = _now()
             exit_code = EXIT_CONFIG_ERROR
             try:
-                exit_code = run_plan_once(run_config, today)
+                exit_code = run_plan_once(
+                    run_config, today,
+                    deadline_at=_round_deadline(run_config, window, now),
+                )
             except Exception as e:  # 单轮异常不终止常驻进程
                 log_line(f'本轮执行异常: {e}', level='ERROR')
             finally:
@@ -333,6 +442,9 @@ def run_daemon(wait: bool = False) -> int:
             if exit_code != EXIT_CONFIG_ERROR and _shutdown_if_configured(run_config):
                 log_line('已安排关机，常驻调度退出')
                 return exit_code
+
+            if window is not None and not window.contains(datetime.datetime.now()):
+                log_line(f'时间窗 {window_text} 已结束，本轮结束')
 
             _sleep(poll_seconds)
     except KeyboardInterrupt:

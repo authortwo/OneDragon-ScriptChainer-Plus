@@ -31,23 +31,23 @@ class SingleInstanceLock:
         pid = data.get('pid')
         return pid if isinstance(pid, int) else None
 
-    def acquire(self, wait_seconds: float = 0.0) -> bool:
+    def acquire(self, wait_seconds: float | None = 0.0) -> bool:
         """尝试获取锁。
 
         Args:
-            wait_seconds: 获取不到时最多等待的秒数，0 表示立即返回。
+            wait_seconds: 获取不到时最多等待的秒数，0 表示立即返回，None 表示一直等到拿到锁。
 
         Returns:
             是否拿到锁。
         """
-        deadline = time.time() + max(0.0, wait_seconds)
+        deadline = None if wait_seconds is None else time.time() + max(0.0, wait_seconds)
         while True:
             if self._try_create():
                 self._acquired = True
                 self._register_atexit()
                 return True
 
-            if time.time() >= deadline:
+            if deadline is not None and time.time() >= deadline:
                 return False
 
             if not self._is_holder_alive():
@@ -55,7 +55,10 @@ class SingleInstanceLock:
                 self._safe_unlink()
                 continue
 
-            time.sleep(min(1.0, max(0.05, deadline - time.time())))
+            if deadline is None:
+                time.sleep(1.0)
+            else:
+                time.sleep(min(1.0, max(0.05, deadline - time.time())))
 
     def release(self) -> None:
         if not self._acquired:
