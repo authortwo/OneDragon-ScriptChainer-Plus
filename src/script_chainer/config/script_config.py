@@ -171,6 +171,8 @@ class ScriptConfig:
     attach_direction: str = AttachDirection.NONE
     no_log_timeout_seconds: int = DEFAULT_NO_LOG_TIMEOUT_SECONDS
     no_log_max_retries: int = 3
+    fail_fast: dict = field(default_factory=dict)
+    stall: dict = field(default_factory=dict)
 
     # 不参与序列化的元数据
     idx: int = field(default=0, repr=False, compare=False)
@@ -193,10 +195,20 @@ class ScriptConfig:
             retries = 0
         self.no_log_max_retries = max(0, retries)
 
+        # 日志规则按字典保存，允许留空表示使用默认行为
+        if not isinstance(self.fail_fast, dict):
+            self.fail_fast = {}
+        if not isinstance(self.stall, dict):
+            self.stall = {}
+
     def to_dict(self) -> dict:
-        """序列化为字典（排除 idx）。"""
+        """序列化为字典（排除 idx 与空规则，避免污染配置文件）。"""
         d = asdict(self)
         d.pop('idx', None)
+        if not d.get('fail_fast'):
+            d.pop('fail_fast', None)
+        if not d.get('stall'):
+            d.pop('stall', None)
         return d
 
     @classmethod

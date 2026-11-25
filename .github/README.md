@@ -78,6 +78,30 @@ schedule:                    # 星期 -> 脚本链列表
 
 脚本的无日志超时保护默认 300 秒且不可关闭：超过设定秒数没有任何日志输出时判定为未响应，按 `no_log_max_retries` 重试。
 
+### 脚本级错误与打转规则
+
+三款游戏的错误形态差异很大，共用一套正则必然误判，因此规则写在每个脚本的配置里（`config/script_chain/*.yml` 的 `script_list` 项）：
+
+```yaml
+fail_fast:                              # 任务级错误识别
+  enabled: true
+  grace_seconds: 240                    # 命中后宽限时间，期间自行恢复则不算失败
+  error_patterns:                       # 命中即记错
+    - "\\[ERROR\\]\\[task_flow\\.py\\]"
+    - "任务 '[^']{1,40}' 执行失败"
+  ignore_patterns: ["DEBUG"]            # 优先忽略
+stall:                                  # 卡死 / 原地打转检测
+  enabled: true                         # 默认开启
+  window_minutes: 8                     # 统计窗口
+  min_repeats: 200                      # 窗口内同一行（数字归一化为 #）重复次数
+  ignore_pattern: "DEBUG"
+  grace_seconds: 60                     # 命中后宽限时间，期间自行恢复则不算失败
+```
+
+- `fail_fast` 未配置任何 `error_patterns` 时视为关闭；非法正则会被丢弃。
+- `stall` 默认开启，用「同一行日志在窗口内累计次数」判定，数字统一归一化，避免「第 1 次 / 第 2 次」被当成不同行。
+- 命中后不会立刻终止，先给宽限时间；到期仍未结束才终止脚本并判 `fail`，报告中 `end_reason` 为 `task_error` 或 `stall`。
+
 | 命令 | 说明 |
 | --- | --- |
 | `--daemon` | 启动常驻调度（单实例，重复启动会被拒绝） |

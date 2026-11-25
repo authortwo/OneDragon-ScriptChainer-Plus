@@ -31,6 +31,7 @@ from script_chainer.services import run_verdict
 from script_chainer.services.chain_schedule import list_available_chains
 from script_chainer.services.log_notifier import LogNotifier
 from script_chainer.services.run_reporter import RunReporter
+from script_chainer.services.script_rules import LogRuleMonitor, parse_fail_fast, parse_stall
 from script_chainer.services.process_manager import (
     LauncherExitError,
     ProcessInfo,
@@ -75,6 +76,15 @@ _active_pm: ProcessManager | None = None
 
 class _NoLogTimeoutError(Exception):
     """脚本长时间无日志输出时抛出，触发外层重试。"""
+
+
+class _RuleViolationError(Exception):
+    """命中任务级错误或打转规则且已过宽限期时抛出，触发重跑。"""
+
+    def __init__(self, reason: str, summary: str):
+        self.reason = reason
+        self.summary = summary
+        super().__init__(summary)
 
 
 class _DeadlineReachedError(Exception):
@@ -206,6 +216,7 @@ def _make_stdout_callback(
     display_name: str,
     log_notifier: LogNotifier | None = None,
     state: _RunMonitorState | None = None,
+    rules: LogRuleMonitor | None = None,
 ) -> Callable[[str], None]:
     """创建 stdout 回调，为每行输出添加前缀。
 
@@ -213,6 +224,7 @@ def _make_stdout_callback(
         display_name: 显示名称。
         log_notifier: 可选的日志通知器，用于定时推送日志。
         state: 可选的运行监控状态，用于记录最后一次收到日志的时间戳与首条错误。
+        rules: 可选的日志规则监控器，用于任务级错误与打转判定。
     """
     prefix = f'{Style.DIM}[{display_name}]{Style.RESET_ALL}'
 
@@ -225,6 +237,8 @@ def _make_stdout_callback(
             state.last_log_time = time.time()
             if not state.first_error and _looks_like_error_line(line):
                 state.first_error = line.strip()[:300]
+        if rules is not None:
+            rules.feed(line)
 
     return _on_stdout
 
@@ -245,6 +259,7 @@ def _launch_script(
     target_process_infos: list[ProcessInfo] | None = None,
     log_notifier: LogNotifier | None = None,
     state: _RunMonitorState | None = None,
+    rules: LogRuleMonitor | None = None,
 ) -> ProcessManager:
     """启动脚本子进程并返回 ProcessManager。
 
@@ -257,6 +272,7 @@ def _launch_script(
         script_config: 脚本配置。
         log_notifier: 可选的日志通知器，用于定时推送日志。
         state: 可选的运行监控状态，用于记录最后一次收到日志的时间戳。
+        rules: 可选的日志规则监控器，用于任务级错误与打转判定。
 
     Returns:
         已初始化的 ProcessManager。
@@ -276,7 +292,7 @@ def _launch_script(
             args=args_list,
             target_process=target_process_infos,
             search_timeout=30,
-            stdout_callback=_make_stdout_callback(display_name, log_notifier, state),
+            stdout_callback=_make_stdout_callback(display_name, log_notifier, state, rules),
         )
     except LauncherExitError as e:
         log.error('启动器异常退出: %s', e, exc_info=True)
@@ -364,6 +380,7 @@ def _monitor_script_done(
     state: _RunMonitorState,
     pm: ProcessManager,
     deadline_at: float | None = None,
+    rules: LogRuleMonitor | None = None,
 ) -> run_verdict.ScriptOutcome:
     """监控脚本运行状态，等待完成条件满足。
 
@@ -372,6 +389,7 @@ def _monitor_script_done(
         state: 运行监控状态（跨 _wait_for_subprocess_ready 持久化的进程存在标志）。
         pm: 当前脚本对应的进程管理器。
         deadline_at: 全局截止时间戳（秒），到达后返回截止结果并停止后续脚本。
+        rules: 可选的日志规则监控器，命中并过宽限期后抛出 _RuleViolationError。
 
     Returns:
         运行结果（分类 + 结束原因）。
@@ -492,6 +510,17 @@ def _monitor_script_done(
             )
             raise _NoLogTimeoutError()
 
+        # 任务级错误 / 打转检查（已过宽限期才终止）
+        if rules is not None:
+            violation = rules.check(now)
+            if violation is not None:
+                print_message(
+                    f'脚本命中规则 {violation.reason}，判定为失败 {script_config.script_display_name}：'
+                    f'{violation.summary}',
+                    level='ERROR',
+                )
+                raise _RuleViolationError(violation.reason, violation.summary)
+
         if _exit_controller.wait(1):
             # 已请求退出（控制台关闭 / Ctrl+C），由信号处理流程善后
             return run_verdict.ScriptOutcome(
@@ -584,7 +613,11 @@ def _run_script_once(
 
     # 1. 启动脚本子进程
     state = _RunMonitorState()
-    pm = _launch_script(script_config, target_process_infos, log_notifier, state)
+    rules = LogRuleMonitor(
+        parse_fail_fast(script_config.fail_fast),
+        parse_stall(script_config.stall),
+    )
+    pm = _launch_script(script_config, target_process_infos, log_notifier, state, rules)
     _active_pm = pm
     try:
         # 2. 等待子进程就绪
@@ -611,10 +644,19 @@ def _run_script_once(
 
         # 3. 监控脚本运行状态
         try:
-            outcome = _monitor_script_done(script_config, state, pm, deadline_at=deadline_at)
+            outcome = _monitor_script_done(
+                script_config, state, pm, deadline_at=deadline_at, rules=rules,
+            )
         except (_NoLogTimeoutError, _DeadlineReachedError):
             _cleanup_processes(script_config, pm, force_script=True)
             raise
+        except _RuleViolationError as e:
+            _cleanup_processes(script_config, pm, force_script=True)
+            return run_verdict.ScriptOutcome(
+                run_verdict.FAIL,
+                end_reason=e.reason,
+                error_summary=e.summary,
+            )
 
         # 4. 清理进程（正常退出路径）
         _cleanup_processes(script_config, pm)
