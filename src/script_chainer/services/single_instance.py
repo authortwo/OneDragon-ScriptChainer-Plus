@@ -47,13 +47,17 @@ class SingleInstanceLock:
                 self._register_atexit()
                 return True
 
+            if not self._is_holder_alive():
+                # 僵尸锁：持有进程已不存在（断电、强杀后残留），清理后立即重试一次
+                self._safe_unlink()
+                if self._try_create():
+                    self._acquired = True
+                    self._register_atexit()
+                    return True
+                # 清理失败（如权限不足）不重试，避免 0 秒等待时陷入死循环
+
             if deadline is not None and time.time() >= deadline:
                 return False
-
-            if not self._is_holder_alive():
-                # 僵尸锁：持有进程已不存在，清理后重试
-                self._safe_unlink()
-                continue
 
             if deadline is None:
                 time.sleep(1.0)
