@@ -19,9 +19,9 @@ from one_dragon.base.web.common_downloader import (
 from one_dragon.utils import os_utils
 from one_dragon.utils.i18_utils import gt
 from one_dragon.utils.log_utils import log
+from script_chainer.services.download_spec import ResourceDownloadSpec
 
 if TYPE_CHECKING:
-    from one_dragon_qt.services.download_queue_service import ResourceDownloadSpec
     from script_chainer.context.script_chainer_context import ScriptChainerContext
 
 APP_EXE_NAMES = (
@@ -36,6 +36,9 @@ GITHUB_API_URL = 'https://api.github.com'
 CNB_WEB_URL = 'https://cnb.cool'
 CNB_SOURCE_ID = 'cnb'
 CNB_TAG_TIMEOUT_SECONDS = 30
+
+# 进程内缓存 git 路径，空字符串表示已确认不可用
+_GIT_EXE_CACHE: list[str] = []
 
 _VERSION_PATTERN = re.compile(r'^[vV]?(\d+(?:\.\d+)*)(?:-([0-9A-Za-z.\-]+))?$')
 
@@ -101,7 +104,6 @@ class GithubUpdateService:
             下载队列任务规格。
         """
         from one_dragon.version import __version__
-        from one_dragon_qt.services.download_queue_service import ResourceDownloadSpec
 
         work_dir = Path(os_utils.get_work_dir())
         update_dir = work_dir / '.temp' / UPDATE_DIR_NAME
@@ -298,10 +300,14 @@ class GithubUpdateService:
         Returns:
             标签列表；git 不可用或命令失败时返回 None，由调用方回退页面解析。
         """
+        git_path = self._git_executable()
+        if not git_path:
+            return None
+
         url = f'{CNB_WEB_URL}/{repo_path}.git'
         try:
             result = subprocess.run(
-                [self._git_executable(), 'ls-remote', '--tags', url],
+                [git_path, 'ls-remote', '--tags', url],
                 capture_output=True,
                 text=True,
                 timeout=CNB_TAG_TIMEOUT_SECONDS,
@@ -327,7 +333,11 @@ class GithubUpdateService:
         return tags
 
     def _git_executable(self) -> str:
-        """优先使用项目配置的 git，找不到时回退到 PATH 中的 git。"""
+        """返回可用的 git 路径，找不到时返回空字符串（结果缓存，避免反复探测）。"""
+        if _GIT_EXE_CACHE:
+            return _GIT_EXE_CACHE[0]
+
+        candidates: list[str] = []
         git_service = getattr(self.ctx, 'git_service', None)
         getter = getattr(git_service, 'get_os_git_path', None)
         if callable(getter):
@@ -336,8 +346,20 @@ class GithubUpdateService:
             except Exception:
                 path = None
             if isinstance(path, str) and path:
-                return path
-        return 'git'
+                candidates.append(path)
+
+        which_git = shutil.which('git')
+        if which_git:
+            candidates.append(which_git)
+
+        for candidate in candidates:
+            if os.path.isfile(candidate):
+                _GIT_EXE_CACHE.append(candidate)
+                return candidate
+
+        log.info('未找到可用的 git，CNB 版本改用页面解析')
+        _GIT_EXE_CACHE.append('')
+        return ''
 
     def _get_cnb_releases(self, repo_path: str) -> list[dict]:
         """解析 CNB release 页面内嵌的 release 列表。"""

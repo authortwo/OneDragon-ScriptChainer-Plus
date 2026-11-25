@@ -105,6 +105,7 @@ h1 { font-size: 17px; font-weight: 650; letter-spacing: -.01em; margin: 0; }
 .tag-py { color: #4fd57d; background: rgba(45, 190, 85, .08); border-color: rgba(45, 190, 85, .25); }
 .tag-op { color: #f0a050; background: rgba(224, 128, 32, .08); border-color: rgba(224, 128, 32, .25); }
 .tag-off { color: var(--t3); background: rgba(144, 147, 153, .08); border-color: rgba(144, 147, 153, .25); }
+.tag-pre { color: #a5a6ff; background: rgba(109, 110, 241, .1); border-color: rgba(109, 110, 241, .35); }
 
 .badge {
   display: inline-flex; align-items: center; gap: 5px; font-size: 11px; font-weight: 600;

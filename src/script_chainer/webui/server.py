@@ -12,6 +12,7 @@ import subprocess
 import sys
 import threading
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 from fastapi import FastAPI, HTTPException
@@ -126,6 +127,12 @@ class SettingsPatch(BaseModel):
 
     repository_id: str | None = None
     resource_source: str | None = None
+
+
+class UpdateCheckRequest(BaseModel):
+    """检查更新请求。"""
+
+    channel: str = 'stable'
 
 
 class _Runtime:
@@ -479,6 +486,84 @@ def _stop_launched() -> dict:
 # 应用
 # ----------------------------------------------------------------------
 
+def _check_update(channel: str) -> dict:
+    """检查最新版本，失败时把错误写进返回值。"""
+    from script_chainer.services.github_update_service import GithubUpdateService
+
+    repo_config = RepoConfig()
+    service = GithubUpdateService(SimpleNamespace(
+        env_config=EnvConfig(repo_config),
+        repo_config=repo_config,
+    ))
+    result = {
+        'current_version': __version__,
+        'channel': channel,
+        'stable': '',
+        'beta': '',
+        'target': '',
+        'can_update': False,
+        'message': '',
+    }
+    try:
+        stable, beta = service.get_latest_tags()
+    except Exception as e:
+        result['message'] = f'检查更新失败：{e}'
+        return result
+
+    result['stable'] = stable
+    result['beta'] = beta
+    target = beta if channel == 'beta' else stable
+    result['target'] = target
+
+    if not target:
+        result['message'] = '该通道暂无可用版本'
+        return result
+    if not os_utils.run_in_exe():
+        result['message'] = f'当前版本 {__version__}，最新 {target}；非发布版无法自动更新'
+        return result
+    if target == __version__:
+        result['message'] = f'已是最新版本 {__version__}'
+        return result
+
+    result['can_update'] = True
+    result['message'] = f'可更新：{__version__} → {target}'
+    return result
+
+
+def _apply_update(target_tag: str) -> dict:
+    """下载更新包并启动替换脚本，随后退出当前进程。"""
+    if not os_utils.run_in_exe():
+        raise HTTPException(status_code=400, detail='当前不是发布版，无法自动更新')
+
+    from one_dragon.base.config.notify_config import NotifyConfig as _NotifyConfig
+
+    from script_chainer.context.script_chainer_context import ScriptChainerContext
+    from script_chainer.services.github_update_service import GithubUpdateService
+
+    ctx = ScriptChainerContext()
+    ctx.notify_config = _NotifyConfig(None, {})
+    service = GithubUpdateService(ctx)
+    spec = service.build_download_spec(target_tag)
+
+    if spec.before_download is not None:
+        spec.before_download()
+
+    downloader = spec.downloader_factory()
+    success = downloader.download(
+        source_order=spec.source_order,
+        proxy_url=ctx.env_config.personal_proxy if ctx.env_config.is_personal_proxy else None,
+        ghproxy_url=ctx.env_config.gh_proxy_url if ctx.env_config.is_gh_proxy else None,
+        skip_if_existed=False,
+    )
+    if not success:
+        raise HTTPException(status_code=500, detail='更新包下载失败，请检查网络或换一个下载源')
+
+    if spec.after_download is not None:
+        spec.after_download(True)
+
+    return {'applied': True, 'target': target_tag, 'message': '更新包已就绪，程序即将退出并替换文件'}
+
+
 def create_app() -> FastAPI:
     """构造 FastAPI 应用。"""
     app = FastAPI(title='千机链', version=__version__, docs_url=None, redoc_url=None)
@@ -688,6 +773,21 @@ def create_app() -> FastAPI:
     @app.get('/api/options')
     def options() -> dict:
         return _options_payload()
+
+    @app.post('/api/update/check')
+    def check_update(body: UpdateCheckRequest | None = None) -> dict:
+        channel = (body.channel if body else 'stable') or 'stable'
+        if channel not in ('stable', 'beta'):
+            raise HTTPException(status_code=400, detail=f'未知通道 {channel}')
+        return _check_update(channel)
+
+    @app.post('/api/update/apply')
+    def apply_update(body: UpdateCheckRequest | None = None) -> dict:
+        channel = (body.channel if body else 'stable') or 'stable'
+        info = _check_update(channel)
+        if not info['can_update']:
+            raise HTTPException(status_code=400, detail=info['message'])
+        return _apply_update(info['target'])
 
     @app.get('/')
     def index() -> FileResponse:

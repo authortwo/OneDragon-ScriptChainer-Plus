@@ -848,6 +848,8 @@ function NotifyPage({ data, refresh, notify }) {
 function SettingsPage({ data, refresh, notify }) {
   const [form, setForm] = useState(data.settings);
   const [busy, setBusy] = useState(false);
+  const [update, setUpdate] = useState(null);
+  const [updateBusy, setUpdateBusy] = useState(false);
 
   useEffect(() => { setForm(data.settings); }, [data.settings]);
 
@@ -868,6 +870,41 @@ function SettingsPage({ data, refresh, notify }) {
       notify(e.message, true);
     } finally {
       setBusy(false);
+    }
+  };
+
+  const checkUpdate = async (channel) => {
+    setUpdateBusy(true);
+    setUpdate({ channel, message: '正在检查…', can_update: false });
+    try {
+      const payload = await api('/api/update/check', {
+        method: 'POST',
+        body: JSON.stringify({ channel }),
+      });
+      setUpdate(payload);
+    } catch (e) {
+      setUpdate({ channel, message: e.message, can_update: false });
+    } finally {
+      setUpdateBusy(false);
+    }
+  };
+
+  const applyUpdate = async () => {
+    if (!update || !update.can_update) return;
+    setUpdateBusy(true);
+    setUpdate({ ...update, message: '正在下载更新包…' });
+    try {
+      const payload = await api('/api/update/apply', {
+        method: 'POST',
+        body: JSON.stringify({ channel: update.channel }),
+      });
+      setUpdate({ ...update, can_update: false, message: payload.message });
+      notify(payload.message);
+    } catch (e) {
+      setUpdate({ ...update, can_update: false, message: e.message });
+      notify(e.message, true);
+    } finally {
+      setUpdateBusy(false);
     }
   };
 
@@ -905,8 +942,28 @@ function SettingsPage({ data, refresh, notify }) {
     </div>
 
     <div class="card" style=${{ padding: '16px' }}>
+      <div class="row" style=${{ marginBottom: '10px' }}>
+        <div class="grow section-title">检查更新</div>
+        <button class="btn" onClick=${() => checkUpdate('stable')} disabled=${updateBusy}>
+          <${Icon} name="refresh-cw" />正式版
+        </button>
+        <button class="btn" onClick=${() => checkUpdate('beta')} disabled=${updateBusy}>
+          <${Icon} name="flask-conical" />测试版
+        </button>
+        ${update && update.can_update
+          ? html`<button class="btn btn-primary" onClick=${applyUpdate} disabled=${updateBusy}>
+              <${Icon} name="download" />更新
+            </button>`
+          : null}
+      </div>
+      ${update
+        ? html`<div class="small" style=${{ color: update.can_update ? '#8ce05f' : 'var(--t2)', whiteSpace: 'pre-wrap' }}>${update.message}</div>`
+        : html`<div class="small muted">更新包按主仓库优先下载，失败自动回退到其他源</div>`}
+    </div>
+
+    <div class="card" style=${{ padding: '16px' }}>
       <div class="section-title" style=${{ marginBottom: '8px' }}>运行环境</div>
-      <div class="kv"><span class="k">Python</span><span class="v mono">${data.version}</span></div>
+      <div class="kv"><span class="k">当前版本</span><span class="v mono">${data.version}</span></div>
       <div class="kv"><span class="k">今日状态</span><span class="v">${data.status.daily_label}</span></div>
       <div class="kv"><span class="k">常驻调度</span><span class="v">${data.status.scheduler_pid ? `运行中 (pid=${data.status.scheduler_pid})` : '未运行'}</span></div>
       <div class="kv"><span class="k">配置文件</span><span class="v mono">config/run.yml</span></div>
