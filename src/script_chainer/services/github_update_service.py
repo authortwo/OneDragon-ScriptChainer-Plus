@@ -1,5 +1,6 @@
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -34,6 +35,51 @@ GITHUB_USER_AGENT = 'OneDragon-ScriptChainer'
 GITHUB_API_URL = 'https://api.github.com'
 CNB_WEB_URL = 'https://cnb.cool'
 CNB_SOURCE_ID = 'cnb'
+CNB_TAG_TIMEOUT_SECONDS = 30
+
+_VERSION_PATTERN = re.compile(r'^[vV]?(\d+(?:\.\d+)*)(?:-([0-9A-Za-z.\-]+))?$')
+
+
+def _is_prerelease(tag: str) -> bool:
+    """SemVer 预发布版本：核心版本号后带 -xxx。"""
+    return '-' in tag.strip().lstrip('vV')
+
+
+def _version_key(tag: str) -> tuple | None:
+    """把 v1.5.1 / v1.6.0-beta.2 转成可排序的键，无法解析时返回 None。"""
+    match = _VERSION_PATTERN.match(tag.strip())
+    if match is None:
+        return None
+
+    numbers = [int(part) for part in match.group(1).split('.')]
+    while len(numbers) < 3:
+        numbers.append(0)
+    core = tuple(numbers)
+
+    prerelease = match.group(2)
+    if prerelease is None:
+        return core + (1,)
+
+    parts: list[tuple[int, object]] = []
+    for part in prerelease.replace('-', '.').split('.'):
+        parts.append((0, int(part)) if part.isdigit() else (1, part))
+    return core + (0, tuple(parts))
+
+
+def _select_cnb_tag(tags: list[str], prerelease: bool) -> str:
+    """从标签列表中选出最大的正式版或测试版。"""
+    best_tag = ''
+    best_key: tuple | None = None
+    for tag in tags:
+        if _is_prerelease(tag) != prerelease:
+            continue
+        key = _version_key(tag)
+        if key is None:
+            continue
+        if best_key is None or key > best_key:
+            best_key = key
+            best_tag = tag
+    return best_tag
 
 
 class GithubUpdateService:
@@ -191,6 +237,11 @@ class GithubUpdateService:
     def _fetch_latest_stable_tag(self, source_id: str, repo_path: str) -> str:
         """从指定源获取最新正式版标签。"""
         if source_id == CNB_SOURCE_ID:
+            tags = self._get_cnb_tags(repo_path)
+            if tags is not None:
+                return _select_cnb_tag(tags, prerelease=False)
+
+            # git 不可用时回退页面解析
             releases = self._get_cnb_releases(repo_path)
             for release in releases:
                 if release.get('is_draft') or release.get('is_prerelease'):
@@ -215,6 +266,11 @@ class GithubUpdateService:
     def _fetch_latest_beta_tag(self, source_id: str, repo_path: str) -> str:
         """从指定源获取最新测试版标签。"""
         if source_id == CNB_SOURCE_ID:
+            tags = self._get_cnb_tags(repo_path)
+            if tags is not None:
+                return _select_cnb_tag(tags, prerelease=True)
+
+            # git 不可用时回退页面解析
             for release in self._get_cnb_releases(repo_path):
                 if release.get('is_draft'):
                     continue
@@ -235,6 +291,53 @@ class GithubUpdateService:
                     return tag
 
         return ''
+
+    def _get_cnb_tags(self, repo_path: str) -> list[str] | None:
+        """用 git ls-remote 读取 CNB 仓库标签，不依赖页面结构。
+
+        Returns:
+            标签列表；git 不可用或命令失败时返回 None，由调用方回退页面解析。
+        """
+        url = f'{CNB_WEB_URL}/{repo_path}.git'
+        try:
+            result = subprocess.run(
+                [self._git_executable(), 'ls-remote', '--tags', url],
+                capture_output=True,
+                text=True,
+                timeout=CNB_TAG_TIMEOUT_SECONDS,
+                check=False,
+            )
+        except (OSError, subprocess.SubprocessError) as e:
+            log.warning(f'git ls-remote 读取 CNB 标签失败: {e}')
+            return None
+
+        if result.returncode != 0:
+            log.warning(f'git ls-remote 读取 CNB 标签失败: {result.stderr.strip()}')
+            return None
+
+        tags: list[str] = []
+        for line in result.stdout.splitlines():
+            _, _, ref = line.partition('\t')
+            ref = ref.strip()
+            if not ref.startswith('refs/tags/') or ref.endswith('^{}'):
+                continue
+            tag = ref[len('refs/tags/'):]
+            if tag and tag not in tags:
+                tags.append(tag)
+        return tags
+
+    def _git_executable(self) -> str:
+        """优先使用项目配置的 git，找不到时回退到 PATH 中的 git。"""
+        git_service = getattr(self.ctx, 'git_service', None)
+        getter = getattr(git_service, 'get_os_git_path', None)
+        if callable(getter):
+            try:
+                path = getter()
+            except Exception:
+                path = None
+            if isinstance(path, str) and path:
+                return path
+        return 'git'
 
     def _get_cnb_releases(self, repo_path: str) -> list[dict]:
         """解析 CNB release 页面内嵌的 release 列表。"""
