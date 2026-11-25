@@ -1,0 +1,272 @@
+"""结构化运行事件与运行报告。
+
+运行器在每个脚本的生命周期节点输出一行 `[event] {json}`，并在链结束时写汇总报告，
+外部程序只需解析 JSON 即可判定结果，不必再依赖中文日志文案。
+
+文本日志保持不变，向后兼容旧的日志解析方式。
+"""
+
+from __future__ import annotations
+
+import datetime
+import json
+import os
+import time
+from dataclasses import dataclass, field
+from pathlib import Path
+
+from one_dragon.utils import os_utils
+from script_chainer.services import run_verdict
+
+DEFAULT_EVENTS_NAME = 'run-events.jsonl'
+"""默认事件流文件名，位于 `config/state` 下。"""
+
+DEFAULT_REPORT_NAME = 'last-report.json'
+"""默认运行报告文件名，位于 `config/state` 下。"""
+
+EVENT_PREFIX = '[event] '
+"""事件行前缀，便于外部按前缀提取结构化数据。"""
+
+
+def _now_text() -> str:
+    return datetime.datetime.now().strftime('%Y-%m-%dT%H:%M:%S')
+
+
+def _state_dir() -> Path:
+    return Path(os_utils.get_path_under_work_dir('config', 'state'))
+
+
+@dataclass
+class ScriptRecord:
+    """单个脚本的运行记录。"""
+
+    index: int
+    display_name: str
+    script_path: str
+    started_at: str
+    ended_at: str
+    duration_sec: float
+    verdict: str
+    end_reason: str
+    error_summary: str
+    retry_round: int
+
+    def to_dict(self) -> dict:
+        return {
+            'index': self.index,
+            'display_name': self.display_name,
+            'script_path': self.script_path,
+            'started_at': self.started_at,
+            'ended_at': self.ended_at,
+            'duration_sec': self.duration_sec,
+            'verdict': self.verdict,
+            'end_reason': self.end_reason,
+            'error_summary': self.error_summary,
+            'retry_round': self.retry_round,
+        }
+
+
+@dataclass
+class _PendingScript:
+    """已开始但尚未结束的脚本，用于计算耗时。"""
+
+    display_name: str
+    script_path: str
+    started_ts: float
+    started_at: str
+
+
+@dataclass
+class RunReporter:
+    """收集运行事件并输出结构化报告。
+
+    Args:
+        chain_name: 当前脚本链名称。
+        events_path: 事件流（JSON Lines）输出路径，None 时写入 `config/state/run-events.jsonl`。
+        report_path: 汇总报告输出路径，None 时写入 `config/state/last-report.json`。
+    """
+
+    chain_name: str
+    events_path: Path | None = None
+    report_path: Path | None = None
+    started_at: str = ''
+    started_ts: float = 0.0
+    records: list[ScriptRecord] = field(default_factory=list)
+    _pending: dict[int, _PendingScript] = field(default_factory=dict, repr=False)
+
+    def __post_init__(self) -> None:
+        if self.events_path is None:
+            self.events_path = _state_dir() / DEFAULT_EVENTS_NAME
+        else:
+            self.events_path = Path(self.events_path)
+        if self.report_path is None:
+            self.report_path = _state_dir() / DEFAULT_REPORT_NAME
+        else:
+            self.report_path = Path(self.report_path)
+
+    # ------------------------------------------------------------------
+    # 事件写入
+    # ------------------------------------------------------------------
+
+    def chain_started(self) -> None:
+        """记录链开始，并重置事件流文件。"""
+        self.started_ts = time.time()
+        self.started_at = _now_text()
+        self._reset_events_file()
+        self._emit({'event': 'chain_start', 'chain': self.chain_name})
+
+    def script_started(self, index: int, display_name: str, script_path: str) -> None:
+        """记录单个脚本开始。"""
+        pending = _PendingScript(
+            display_name=display_name,
+            script_path=script_path,
+            started_ts=time.time(),
+            started_at=_now_text(),
+        )
+        self._pending[index] = pending
+        self._emit({
+            'event': 'script_start',
+            'chain': self.chain_name,
+            'index': index,
+            'script_path': script_path,
+            'display_name': display_name,
+        })
+
+    def script_finished(self, index: int, outcome: run_verdict.ScriptOutcome) -> ScriptRecord:
+        """记录单个脚本结束，并返回运行记录。"""
+        pending = self._pending.pop(index, None)
+        now_ts = time.time()
+        if pending is None:
+            pending = _PendingScript('', '', now_ts, _now_text())
+
+        record = ScriptRecord(
+            index=index,
+            display_name=pending.display_name,
+            script_path=pending.script_path,
+            started_at=pending.started_at,
+            ended_at=_now_text(),
+            duration_sec=round(max(0.0, now_ts - pending.started_ts), 1),
+            verdict=outcome.verdict,
+            end_reason=outcome.end_reason,
+            error_summary=outcome.error_summary,
+            retry_round=outcome.retry_round,
+        )
+        self.records.append(record)
+        self._emit({'event': 'script_end', 'chain': self.chain_name, **record.to_dict()})
+        return record
+
+    def record_missing(self, index: int, display_name: str, script_path: str, reason: str) -> ScriptRecord:
+        """记录压根没执行的脚本（如到达截止时间后跳过）。"""
+        self._pending.pop(index, None)
+        now_text = _now_text()
+        record = ScriptRecord(
+            index=index,
+            display_name=display_name,
+            script_path=script_path,
+            started_at='',
+            ended_at=now_text,
+            duration_sec=0.0,
+            verdict=run_verdict.MISSING,
+            end_reason=run_verdict.END_REASON_MISSING,
+            error_summary=reason,
+            retry_round=0,
+        )
+        self.records.append(record)
+        self._emit({'event': 'script_end', 'chain': self.chain_name, **record.to_dict()})
+        return record
+
+    def finished_indices(self) -> set[int]:
+        """已记录的脚本下标集合。"""
+        return {record.index for record in self.records}
+
+    def chain_finished(self, exit_code: int, deadline_hit: bool = False) -> dict:
+        """记录链结束，写出汇总报告并返回报告内容。"""
+        ended_ts = time.time()
+        report = self.build_report(exit_code, deadline_hit, ended_ts)
+        self._emit({
+            'event': 'chain_end',
+            'chain': self.chain_name,
+            'exit_code': exit_code,
+            'deadline_hit': deadline_hit,
+            'summary': report['summary'],
+        })
+        self._write_report(report)
+        return report
+
+    # ------------------------------------------------------------------
+    # 报告
+    # ------------------------------------------------------------------
+
+    def build_report(self, exit_code: int, deadline_hit: bool, ended_ts: float | None = None) -> dict:
+        """构造汇总报告（不写文件）。"""
+        ended_ts = ended_ts or time.time()
+        summary = {key: 0 for key in run_verdict.LABELS}
+        for record in self.records:
+            if record.verdict in summary:
+                summary[record.verdict] += 1
+        summary['total'] = len(self.records)
+
+        return {
+            'chain': self.chain_name,
+            'started_at': self.started_at,
+            'ended_at': _now_text(),
+            'duration_sec': round(max(0.0, ended_ts - self.started_ts), 1) if self.started_ts else 0.0,
+            'exit_code': exit_code,
+            'deadline_hit': deadline_hit,
+            'summary': summary,
+            'scripts': [record.to_dict() for record in self.records],
+        }
+
+    def describe(self) -> str:
+        """一行文字汇总，便于控制台直接展示。"""
+        if not self.records:
+            return ''
+        counts: dict[str, int] = {}
+        failures: list[str] = []
+        for record in self.records:
+            counts[record.verdict] = counts.get(record.verdict, 0) + 1
+            if not run_verdict.is_ok(record.verdict):
+                detail = f'{record.display_name or record.index}={run_verdict.label(record.verdict)}'
+                if record.end_reason:
+                    detail += f'({record.end_reason})'
+                failures.append(detail)
+
+        summary = '，'.join(
+            f'{run_verdict.label(verdict)} {count}'
+            for verdict, count in counts.items()
+        )
+        text = f'运行结果：{summary}'
+        if failures:
+            text += f'；未成功脚本：{", ".join(failures)}'
+        return text
+
+    # ------------------------------------------------------------------
+    # 内部
+    # ------------------------------------------------------------------
+
+    def _reset_events_file(self) -> None:
+        try:
+            self.events_path.parent.mkdir(parents=True, exist_ok=True)
+            with open(self.events_path, 'w', encoding='utf-8'):
+                pass
+        except OSError:
+            pass
+
+    def _emit(self, payload: dict) -> None:
+        """输出一行结构化事件：控制台一行 + 追加到事件流文件。"""
+        payload = {'ts': _now_text(), **payload}
+        line = json.dumps(payload, ensure_ascii=False)
+        print(f'{EVENT_PREFIX}{line}', flush=True)
+        try:
+            with open(self.events_path, 'a', encoding='utf-8') as f:
+                f.write(line + os.linesep)
+        except OSError:
+            pass
+
+    def _write_report(self, report: dict) -> None:
+        try:
+            self.report_path.parent.mkdir(parents=True, exist_ok=True)
+            with open(self.report_path, 'w', encoding='utf-8') as f:
+                json.dump(report, f, ensure_ascii=False, indent=2)
+        except OSError:
+            pass

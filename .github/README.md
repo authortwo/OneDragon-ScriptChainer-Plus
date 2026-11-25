@@ -77,6 +77,7 @@ schedule:                    # 星期 -> 脚本链列表
 | `--daemon` | 启动常驻调度（单实例，重复启动会被拒绝） |
 | `--daemon --wait` | 已有实例在运行时，等待其退出后接管 |
 | `--plan` | 按今日计划执行一次后退出，适合手动补跑 |
+| `--report-json <path>` | 指定运行报告 JSON 输出路径，默认 `config/state/last-report.json` |
 | `--autostart on` | 开启开机自启，并写入 `config/run.yml` |
 | `--autostart off` | 关闭开机自启，并写入 `config/run.yml` |
 
@@ -93,6 +94,31 @@ schedule:                    # 星期 -> 脚本链列表
 | 2 | 配置错误（脚本链不存在、脚本配置不合法等） |
 | 3 | 到达全局截止时间，已终止当前脚本并跳过后续脚本 |
 | 4 | 锁屏阻断，未启动任何脚本 |
+
+### 结构化运行结果
+
+运行器不再依赖中文日志文案，每个脚本结束都会输出一条结构化事件，链结束写出汇总报告：
+
+```
+[event] {"ts":"2026-11-25T05:03:59","event":"script_end","chain":"honkai3-daily",
+         "index":0,"display_name":"MAA","script_path":"...mab.exe",
+         "started_at":"...","ended_at":"...","duration_sec":2520,
+         "verdict":"fail","end_reason":"timeout",
+         "error_summary":"任务 '日常奖励领取-第一次' 执行失败","retry_round":1}
+```
+
+| 字段 | 说明 |
+| --- | --- |
+| `verdict` | `ok` / `fail` / `config_error` / `env_error` / `missing` |
+| `end_reason` | `check_done` / `timeout` / `no_log` / `deadline` / `crash` / `cancelled` / `missing` / `config_error` / `env_error` |
+| `error_summary` | 首条疑似错误输出（`[ERROR]`、`Traceback`、`执行失败` 等） |
+| `retry_round` | 第几轮重试的结果，0 表示首轮 |
+
+- 事件流：`config/state/run-events.jsonl`，每行一个 JSON，每次链启动时重置。
+- 汇总报告：`config/state/last-report.json`，也可用 `--report-json <path>` 指定路径。
+- 报告中 `summary` 给出各分类计数，`scripts` 列出每个脚本的下标、耗时、结果与错误摘要；因截止时间或中断未执行的脚本记为 `missing`。
+
+文本日志保持原样，仍可沿用旧的日志解析方式。
 
 ## ☕ 支持我们
 

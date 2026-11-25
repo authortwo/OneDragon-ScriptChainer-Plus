@@ -69,6 +69,12 @@ class ScriptChainerLauncher(ExeLauncher):
             default=None,
             help="全局截止时间戳（秒），由常驻调度传入",
         )
+        parser.add_argument(
+            "--report-json",
+            type=str,
+            default=None,
+            help="运行报告 JSON 输出路径",
+        )
 
     @staticmethod
     def _hide_console() -> None:
@@ -98,6 +104,7 @@ class ScriptChainerLauncher(ExeLauncher):
             shutdown_delay=shutdown_delay,
             debug_index=debug_index,
             deadline_at=self.args.deadline_at if self.args else None,
+            report_json=self.args.report_json if self.args else None,
         )
         sys.exit(exit_code)
 
