@@ -130,6 +130,22 @@ class RunConfig(YamlConfig):
         return value if value in LOCK_POLICIES else 'abort'
 
     @property
+    def shutdown_after_run(self) -> int:
+        """计划跑完后是否关机：0 不关机，大于 0 表示关机延迟秒数。"""
+        try:
+            return max(0, int(self.get('shutdown_after_run', 0)))
+        except (TypeError, ValueError):
+            return 0
+
+    @shutdown_after_run.setter
+    def shutdown_after_run(self, new_value: int) -> None:
+        try:
+            value = max(0, int(new_value))
+        except (TypeError, ValueError):
+            value = 0
+        self.update('shutdown_after_run', value)
+
+    @property
     def retry_max_rounds(self) -> int:
         """失败脚本的重跑轮数，0 表示不重跑。"""
         raw = self.get('retry', None)
@@ -198,6 +214,25 @@ class RunConfig(YamlConfig):
                 'run_window 需要同时填写 start 与 end（如 start: "04:15"、end: "06:15"）'
             )
         return RunWindow(start=start, end=end)
+
+    def update_run_window(self, start: str | None, end: str | None) -> None:
+        """写入运行时间窗；两端都为空时删除该配置表示不限时间。
+
+        Raises:
+            ValueError: 只填了一端，或时间格式不是 HH:MM。
+        """
+        start_text = str(start).strip() if start is not None else ''
+        end_text = str(end).strip() if end is not None else ''
+        if not start_text and not end_text:
+            if 'run_window' in self.data:
+                self.data.pop('run_window')
+                self.save()
+            return
+        if not start_text or not end_text:
+            raise ValueError('时间窗需要同时填写开始与结束时间')
+        _parse_time(start_text, 'start')
+        _parse_time(end_text, 'end')
+        self.update('run_window', {'start': start_text, 'end': end_text})
 
     @property
     def schedule(self) -> dict[str, list[str]]:

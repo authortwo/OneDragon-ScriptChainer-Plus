@@ -24,6 +24,45 @@ def build_autostart_command() -> str:
     )
 
 
+def build_daemon_argv() -> tuple[list[str], str | None]:
+    """构造常驻调度启动命令。
+
+    Returns:
+        (参数列表, 工作目录)，工作目录为 None 表示沿用当前目录。
+    """
+    if getattr(sys, 'frozen', False):
+        return [sys.executable, '--daemon'], None
+
+    work_dir = os_utils.get_path_under_work_dir('src')
+    return [sys.executable, '-m', 'script_chainer.win_exe.launcher', '--daemon'], work_dir
+
+
+def launch_daemon_now() -> str | None:
+    """立即在后台启动常驻调度。
+
+    Returns:
+        None 表示已拉起进程，否则返回错误说明。
+    """
+    import subprocess
+
+    argv, work_dir = build_daemon_argv()
+    creation_flags = 0
+    if sys.platform == 'win32':
+        creation_flags = (
+            subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP
+        )
+    try:
+        subprocess.Popen(
+            argv,
+            cwd=work_dir,
+            creationflags=creation_flags,
+            close_fds=True,
+        )
+    except OSError as e:
+        return f'启动常驻调度失败: {e}'
+    return None
+
+
 def is_autostart_enabled() -> bool:
     """注册表里是否已有本程序的开机自启项。"""
     try:

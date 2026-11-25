@@ -38,6 +38,7 @@ from one_dragon_qt.widgets.setting_card.multi_selection_combo_box_setting_card i
     MultiSelectionComboBoxSettingCard,
 )
 from one_dragon_qt.widgets.setting_card.push_setting_card import PushSettingCard
+from one_dragon_qt.widgets.setting_card.spin_box_setting_card import SpinBoxSettingCard
 from one_dragon_qt.widgets.setting_card.switch_setting_card import SwitchSettingCard
 from one_dragon_qt.widgets.setting_card.text_setting_card import TextSettingCard
 from one_dragon_qt.widgets.vertical_scroll_interface import VerticalScrollInterface
@@ -56,6 +57,10 @@ SCHEDULE_ROWS: tuple[tuple[str, str], ...] = (
     (SCHEDULE_DEFAULT_KEY, '默认（兜底）'),
 )
 """周计划编辑行：配置键 -> 显示名称，最后一行是未命中当天时使用的兜底。"""
+
+AUTOSTART_CONTENT = '随系统登录自动启动常驻调度；切换后立即写入当前用户的开机自启项'
+RUN_WINDOW_START_CONTENT = 'HH:MM，留空表示不限时间；支持跨零点（如 23:00-01:00）'
+RUN_WINDOW_END_CONTENT = 'HH:MM，需与开始时间同时填写'
 
 
 def build_resource_source_options(env_config: EnvConfig) -> list[ConfigItem]:
@@ -340,6 +345,76 @@ class EditorSettingInterface(VerticalScrollInterface):
     def get_run_group(self) -> SettingCardGroup:
         group = SettingCardGroup(gt('运行'))
 
+        self.scheduler_enabled_opt = SwitchSettingCard(
+            icon=FluentIcon.SYNC,
+            title='触发方式：内置常驻调度',
+            content='开启后由程序自身按周计划与时间窗触发，无需配置 Windows 计划任务；关闭则仅手动运行',
+        )
+        group.addSettingCard(self.scheduler_enabled_opt)
+
+        self.autostart_opt = SwitchSettingCard(
+            icon=FluentIcon.POWER_BUTTON,
+            title='开机自启',
+            content=AUTOSTART_CONTENT,
+        )
+        self.autostart_opt.value_changed.connect(self._on_autostart_changed)
+        group.addSettingCard(self.autostart_opt)
+
+        self.run_window_start_opt = TextSettingCard(
+            icon=FluentIcon.DATE_TIME,
+            title='时间窗开始',
+            content=RUN_WINDOW_START_CONTENT,
+            input_placeholder='04:15',
+        )
+        self.run_window_start_opt.value_changed.connect(self._on_run_window_changed)
+        group.addSettingCard(self.run_window_start_opt)
+
+        self.run_window_end_opt = TextSettingCard(
+            icon=FluentIcon.DATE_TIME,
+            title='时间窗结束',
+            content=RUN_WINDOW_END_CONTENT,
+            input_placeholder='06:15',
+        )
+        self.run_window_end_opt.value_changed.connect(self._on_run_window_changed)
+        group.addSettingCard(self.run_window_end_opt)
+
+        self.deadline_minutes_opt = SpinBoxSettingCard(
+            icon=FluentIcon.HISTORY,
+            title='执行时限',
+            content='单次计划的全局截止时间（分钟），0 表示不限；到点后不再启动新的脚本链',
+            minimum=0,
+            maximum=1440,
+            step=30,
+        )
+        group.addSettingCard(self.deadline_minutes_opt)
+
+        self.once_per_day_opt = SwitchSettingCard(
+            icon=FluentIcon.CALENDAR,
+            title='每日只跑一次',
+            content='当天已成功完成后不再重跑；中断后仍允许补跑',
+        )
+        group.addSettingCard(self.once_per_day_opt)
+
+        self.on_locked_opt = ComboBoxSettingCard(
+            icon=FluentIcon.CERTIFICATE,
+            title='锁屏处理',
+            content='检测到锁屏时如何处理本次运行',
+            options_list=[
+                ConfigItem('跳过本次运行', 'abort'),
+                ConfigItem('重启系统后重跑', 'reboot'),
+                ConfigItem('等待解锁后继续', 'wait'),
+            ],
+        )
+        group.addSettingCard(self.on_locked_opt)
+
+        self.shutdown_after_run_opt = SwitchSettingCard(
+            icon=FluentIcon.POWER_BUTTON,
+            title='结束后关机',
+            content='计划跑完后 60 秒关机；关闭则保持开机',
+        )
+        self.shutdown_after_run_opt.value_changed.connect(self._on_shutdown_after_run_changed)
+        group.addSettingCard(self.shutdown_after_run_opt)
+
         self.privacy_screen_key_input = KeySettingCard(
             icon=FluentIcon.POWER_BUTTON,
             title='隐私屏开关快捷键',
@@ -348,7 +423,81 @@ class EditorSettingInterface(VerticalScrollInterface):
         )
         group.addSettingCard(self.privacy_screen_key_input)
 
+        self.start_daemon_card = PushSettingCard(
+            icon=FluentIcon.PLAY,
+            title='立即启动常驻调度',
+            content='按上面的配置启动常驻调度，无需手工创建 Windows 计划任务',
+            text='启动',
+        )
+        self.start_daemon_card.clicked.connect(self._on_start_daemon_clicked)
+        group.addSettingCard(self.start_daemon_card)
+
         return group
+
+    def reload_run_options(self) -> None:
+        """把 run.yml 中不走适配器的调度配置同步到「运行」分组。"""
+        run_config = self.ctx.run_config
+        self.autostart_opt.setValue(run_config.autostart_enabled, emit_signal=False)
+        self.shutdown_after_run_opt.setValue(
+            run_config.shutdown_after_run > 0, emit_signal=False
+        )
+
+        try:
+            window = run_config.run_window
+        except ValueError as e:
+            log.error('运行时间窗配置不合法', exc_info=True)
+            self.run_window_start_opt.setContent(f'配置不合法: {e}')
+            window = None
+        else:
+            self.run_window_start_opt.setContent(RUN_WINDOW_START_CONTENT)
+            self.run_window_end_opt.setContent(RUN_WINDOW_END_CONTENT)
+
+        start_text = f'{window.start:%H:%M}' if window is not None else ''
+        end_text = f'{window.end:%H:%M}' if window is not None else ''
+        self.run_window_start_opt.setValue(start_text, emit_signal=False)
+        self.run_window_end_opt.setValue(end_text, emit_signal=False)
+
+    def _on_autostart_changed(self, enabled: bool) -> None:
+        """切换开机自启时同步写入注册表，失败则提示并回滚开关。"""
+        from script_chainer.services.autostart import sync_autostart
+
+        error = sync_autostart(enabled)
+        if error is not None:
+            log.error(error)
+            self.autostart_opt.setValue(not enabled, emit_signal=False)
+            self.ctx.run_config.autostart_enabled = not enabled
+            self.autostart_opt.setContent(error)
+            return
+        self.ctx.run_config.autostart_enabled = enabled
+        self.autostart_opt.setContent(AUTOSTART_CONTENT)
+
+    def _on_run_window_changed(self) -> None:
+        """校验并写回时间窗，非法格式提示后保持原配置不变。"""
+        start_text = self.run_window_start_opt.getValue().strip()
+        end_text = self.run_window_end_opt.getValue().strip()
+        try:
+            self.ctx.run_config.update_run_window(start_text, end_text)
+        except ValueError as e:
+            log.error('运行时间窗配置不合法', exc_info=True)
+            self.run_window_start_opt.setContent(f'配置不合法: {e}')
+            return
+        self.run_window_start_opt.setContent(RUN_WINDOW_START_CONTENT)
+        self.run_window_end_opt.setContent(RUN_WINDOW_END_CONTENT)
+
+    def _on_shutdown_after_run_changed(self, enabled: bool) -> None:
+        """开关映射为关机延迟：开启 60 秒，关闭 0。"""
+        self.ctx.run_config.shutdown_after_run = 60 if enabled else 0
+
+    def _on_start_daemon_clicked(self) -> None:
+        """立即拉起常驻调度进程，并把结果反馈到卡片说明。"""
+        from script_chainer.services.autostart import launch_daemon_now
+
+        error = launch_daemon_now()
+        if error is not None:
+            log.error(error)
+            self.start_daemon_card.setContent(error)
+            return
+        self.start_daemon_card.setContent('已拉起常驻调度进程；若已有一个实例在运行，新实例会自动退出')
 
     def get_schedule_group(self) -> SettingCardGroup:
         group = SettingCardGroup(gt('周计划'))
@@ -480,6 +629,18 @@ class EditorSettingInterface(VerticalScrollInterface):
     def on_interface_shown(self) -> None:
         VerticalScrollInterface.on_interface_shown(self)
         self.theme_opt.init_with_adapter(self.ctx.custom_config.get_prop_adapter('theme'))
+        self.scheduler_enabled_opt.init_with_adapter(
+            self.ctx.run_config.get_prop_adapter('scheduler_enabled')
+        )
+        self.deadline_minutes_opt.init_with_adapter(
+            self.ctx.run_config.get_prop_adapter('deadline_minutes')
+        )
+        self.once_per_day_opt.init_with_adapter(
+            self.ctx.run_config.get_prop_adapter('once_per_day')
+        )
+        self.on_locked_opt.init_with_adapter(
+            self.ctx.run_config.get_prop_adapter('on_locked')
+        )
         self.privacy_screen_key_input.init_with_adapter(
             self.ctx.run_config.get_prop_adapter('privacy_screen_close_key')
         )
@@ -492,6 +653,7 @@ class EditorSettingInterface(VerticalScrollInterface):
         )
         self.update_proxy_ui()
         self.refresh_gh_proxy_url_by_config()
+        self.reload_run_options()
         self.reload_schedule_options()
 
     def on_theme_changed(self, index: int, value: str) -> None:

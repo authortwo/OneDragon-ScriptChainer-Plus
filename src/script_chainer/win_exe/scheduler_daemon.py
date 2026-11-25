@@ -231,6 +231,21 @@ def run_plan_once(
     return exit_code
 
 
+def _shutdown_if_configured(run_config: RunConfig) -> bool:
+    """计划跑完后按配置关机。
+
+    Returns:
+        True 表示已安排关机，调用方应结束常驻循环；False 表示未配置关机。
+    """
+    seconds = run_config.shutdown_after_run
+    if seconds <= 0:
+        return False
+    from one_dragon.utils import cmd_utils
+    log_line(f'按配置在 {seconds} 秒后关机，可用 shutdown /a 取消')
+    cmd_utils.shutdown_sys(seconds)
+    return True
+
+
 def run_daemon(wait: bool = False) -> int:
     """常驻调度主循环：在时间窗内按周计划每天触发一次。
 
@@ -314,6 +329,10 @@ def run_daemon(wait: bool = False) -> int:
                 log_line(f'本轮执行异常: {e}', level='ERROR')
             finally:
                 state.mark_finished(today, chains, exit_code, started_at=started_at)
+
+            if exit_code != EXIT_CONFIG_ERROR and _shutdown_if_configured(run_config):
+                log_line('已安排关机，常驻调度退出')
+                return exit_code
 
             _sleep(poll_seconds)
     except KeyboardInterrupt:
