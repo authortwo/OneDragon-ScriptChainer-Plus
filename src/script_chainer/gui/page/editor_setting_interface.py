@@ -34,11 +34,28 @@ from one_dragon_qt.widgets.setting_card.key_setting_card import KeySettingCard
 from one_dragon_qt.widgets.setting_card.multi_push_setting_card import (
     MultiPushSettingCard,
 )
+from one_dragon_qt.widgets.setting_card.multi_selection_combo_box_setting_card import (
+    MultiSelectionComboBoxSettingCard,
+)
 from one_dragon_qt.widgets.setting_card.push_setting_card import PushSettingCard
 from one_dragon_qt.widgets.setting_card.switch_setting_card import SwitchSettingCard
 from one_dragon_qt.widgets.setting_card.text_setting_card import TextSettingCard
 from one_dragon_qt.widgets.vertical_scroll_interface import VerticalScrollInterface
+from script_chainer.config.run_config import SCHEDULE_DEFAULT_KEY
 from script_chainer.context.script_chainer_context import ScriptChainerContext
+from script_chainer.services.chain_schedule import list_available_chains
+
+SCHEDULE_ROWS: tuple[tuple[str, str], ...] = (
+    ('monday', '周一'),
+    ('tuesday', '周二'),
+    ('wednesday', '周三'),
+    ('thursday', '周四'),
+    ('friday', '周五'),
+    ('saturday', '周六'),
+    ('sunday', '周日'),
+    (SCHEDULE_DEFAULT_KEY, '默认（兜底）'),
+)
+"""周计划编辑行：配置键 -> 显示名称，最后一行是未命中当天时使用的兜底。"""
 
 
 def build_resource_source_options(env_config: EnvConfig) -> list[ConfigItem]:
@@ -297,6 +314,7 @@ class EditorSettingInterface(VerticalScrollInterface):
 
         content_widget.add_widget(self.get_appearance_group())
         content_widget.add_widget(self.get_run_group())
+        content_widget.add_widget(self.get_schedule_group())
         content_widget.add_widget(self.get_update_group())
 
         content_widget.add_stretch(1)
@@ -331,6 +349,71 @@ class EditorSettingInterface(VerticalScrollInterface):
         group.addSettingCard(self.privacy_screen_key_input)
 
         return group
+
+    def get_schedule_group(self) -> SettingCardGroup:
+        group = SettingCardGroup(gt('周计划'))
+
+        self.schedule_hint_card = PushSettingCard(
+            icon=FluentIcon.SYNC,
+            title='刷新可用脚本链',
+            content='按星期选择当天要运行的脚本链；未配置的星期使用「默认」兜底。改计划无需调整 Windows 计划任务',
+            text='刷新',
+        )
+        self.schedule_hint_card.clicked.connect(self.reload_schedule_options)
+        group.addSettingCard(self.schedule_hint_card)
+
+        self.schedule_cards: dict[str, MultiSelectionComboBoxSettingCard] = {}
+        for key, label in SCHEDULE_ROWS:
+            card = MultiSelectionComboBoxSettingCard(
+                icon=FluentIcon.CALENDAR,
+                title=label,
+                content='未选择则不运行',
+            )
+            card.value_changed.connect(
+                lambda values, k=key: self._on_schedule_changed(k, values)
+            )
+            self.schedule_cards[key] = card
+            group.addSettingCard(card)
+
+        return group
+
+    def reload_schedule_options(self) -> None:
+        """按磁盘上现有的脚本链刷新所有星期的可选列表。"""
+        chains = list_available_chains()
+        options = [ConfigItem(name, name) for name in chains]
+        try:
+            schedule = self.ctx.run_config.schedule
+        except ValueError as e:
+            log.error('周计划配置不合法', exc_info=True)
+            self.schedule_hint_card.setContent(f'周计划配置不合法: {e}')
+            schedule = {}
+        else:
+            self.schedule_hint_card.setContent(
+                f'已读取 {len(chains)} 条可用脚本链；按星期选择当天要运行的链，未配置的星期使用「默认」兜底'
+            )
+
+        for key, card in self.schedule_cards.items():
+            selected = schedule.get(key, [])
+            # 配置里引用了但磁盘上已不存在的链，保留展示以便用户自行清理
+            extra = [name for name in selected if name not in chains]
+            card.set_options_by_list(
+                options + [ConfigItem(name, name, desc='配置中的链已不存在') for name in extra]
+            )
+            card.set_value(list(selected), emit_signal=False)
+
+    def _on_schedule_changed(self, key: str, values: list) -> None:
+        """把某个星期的选择写回 run.yml 的 schedule 段。"""
+        try:
+            current = self.ctx.run_config.schedule
+        except ValueError:
+            current = {}
+        schedule = {name: list(chains) for name, chains in current.items() if chains}
+        chains = [str(value) for value in values]
+        if chains:
+            schedule[key] = chains
+        else:
+            schedule.pop(key, None)
+        self.ctx.run_config.update('schedule', schedule)
 
     def get_update_group(self) -> SettingCardGroup:
         group = SettingCardGroup(gt('更新'))
@@ -409,6 +492,7 @@ class EditorSettingInterface(VerticalScrollInterface):
         )
         self.update_proxy_ui()
         self.refresh_gh_proxy_url_by_config()
+        self.reload_schedule_options()
 
     def on_theme_changed(self, index: int, value: str) -> None:
         """主题改变。
