@@ -18,6 +18,7 @@ class ScriptChainerLauncher(ExeLauncher):
     - --daemon: 内置常驻调度，按周计划在时间窗内每天触发
     - --plan: 按今日周计划执行一次
     - --autostart on|off: 开启/关闭随系统登录自启常驻调度
+    - --replay <日志>: 离线回放历史日志，用同一套规则重新判定
     """
 
     def __init__(self):
@@ -75,6 +76,18 @@ class ScriptChainerLauncher(ExeLauncher):
             default=None,
             help="运行报告 JSON 输出路径",
         )
+        parser.add_argument(
+            "--report-text",
+            type=str,
+            default=None,
+            help="运行报告文本输出路径",
+        )
+        parser.add_argument(
+            "--replay",
+            type=str,
+            default=None,
+            help="离线回放历史日志，用同一套规则重新判定（配合 --chain / --debug-index）",
+        )
 
     @staticmethod
     def _hide_console() -> None:
@@ -105,8 +118,19 @@ class ScriptChainerLauncher(ExeLauncher):
             debug_index=debug_index,
             deadline_at=self.args.deadline_at if self.args else None,
             report_json=self.args.report_json if self.args else None,
+            report_text=self.args.report_text if self.args else None,
         )
         sys.exit(exit_code)
+
+    def run_replay_mode(self) -> None:
+        """离线回放历史日志，不进入 GUI。"""
+        from script_chainer.win_exe.script_runner import run_replay
+
+        sys.exit(run_replay(
+            self.args.replay,
+            chain=self.args.chain or '',
+            script_index=self.args.debug_index,
+        ))
 
     def apply_autostart_setting(self, value: str) -> None:
         """按命令行参数开启/关闭开机自启，并同步回配置。"""
@@ -135,6 +159,9 @@ class ScriptChainerLauncher(ExeLauncher):
 
         if args.autostart is not None:
             self.apply_autostart_setting(args.autostart)
+
+        if args.replay is not None:
+            self.run_replay_mode()
 
         if not pyuac.isUserAdmin():
             pyuac.runAsAdmin(sys.argv, wait=False)

@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import datetime
+import json
 import subprocess
 import time
+from pathlib import Path
 
+from one_dragon.utils import os_utils
 from script_chainer.config.run_config import RunConfig
 from script_chainer.services.autostart import sync_autostart
 from script_chainer.services.chain_schedule import (
@@ -11,6 +14,7 @@ from script_chainer.services.chain_schedule import (
     resolve_chains_for_date,
     split_missing_chains,
 )
+from script_chainer.services.run_reporter import build_plan_text
 from script_chainer.services.run_state import DailyRunState
 from script_chainer.services.single_instance import SingleInstanceLock
 from script_chainer.utils.runner_utils import build_runner_command
@@ -23,6 +27,16 @@ EXIT_LOCKED = 4
 
 _WEEKDAY_NAMES = ('周一', '周二', '周三', '周四', '周五', '周六', '周日')
 
+PLAN_REPORT_JSON = 'last-plan.json'
+"""周计划汇总报告（JSON），位于 `config/state` 下。"""
+
+PLAN_REPORT_TEXT = 'last-plan.txt'
+"""周计划汇总报告（文本），位于 `config/state` 下。"""
+
+
+def _state_dir() -> Path:
+    return Path(os_utils.get_path_under_work_dir('config', 'state'))
+
 
 def _now() -> str:
     return datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
@@ -33,7 +47,19 @@ def log_line(message: str, level: str = 'INFO') -> None:
     print(f'{_now()} | {level:<5} | {message}', flush=True)
 
 
-def run_chain_process(chain_name: str, deadline_at: float | None = None) -> int:
+def _read_report(path: Path) -> dict | None:
+    try:
+        with open(path, encoding='utf-8') as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return None
+
+
+def run_chain_process(
+    chain_name: str,
+    deadline_at: float | None = None,
+    report_json: str | None = None,
+) -> int:
     """以子进程方式运行单条脚本链，返回退出码。
 
     使用子进程而不是进程内调用，保证某条链崩溃不会带崩常驻调度。
@@ -41,8 +67,11 @@ def run_chain_process(chain_name: str, deadline_at: float | None = None) -> int:
     Args:
         chain_name: 脚本链名称。
         deadline_at: 全局截止时间戳（秒），传给 runner 以约束单条链的运行时长。
+        report_json: 该链报告 JSON 输出路径，None 表示由 runner 写默认位置。
     """
-    command, work_dir = build_runner_command(chain_name, deadline_at=deadline_at)
+    command, work_dir = build_runner_command(
+        chain_name, deadline_at=deadline_at, report_json=report_json,
+    )
     log_line(f'启动脚本链 {chain_name}')
     try:
         completed = subprocess.run(command, cwd=work_dir, check=False)
@@ -56,6 +85,19 @@ def run_chain_process(chain_name: str, deadline_at: float | None = None) -> int:
     else:
         log_line(f'脚本链 {chain_name} 失败 exit_code={exit_code}', level='ERROR')
     return exit_code
+
+
+def _write_plan_report(plan: dict) -> None:
+    """写出周计划汇总报告（JSON + 文本），供推送模块直接消费。"""
+    state_dir = _state_dir()
+    try:
+        state_dir.mkdir(parents=True, exist_ok=True)
+        with open(state_dir / PLAN_REPORT_JSON, 'w', encoding='utf-8') as f:
+            json.dump(plan, f, ensure_ascii=False, indent=2)
+        with open(state_dir / PLAN_REPORT_TEXT, 'w', encoding='utf-8') as f:
+            f.write(build_plan_text(plan))
+    except OSError:
+        log_line('写入周计划报告失败', level='ERROR')
 
 
 def run_plan_once(
@@ -85,6 +127,14 @@ def run_plan_once(
         chains = resolve_chains_for_date(run_config, date)
     except ValueError as e:
         log_line(f'周计划配置不合法: {e}', level='ERROR')
+        _write_plan_report({
+            'date': date.isoformat(),
+            'weekday': _WEEKDAY_NAMES[date.weekday()],
+            'exit_code': EXIT_CONFIG_ERROR,
+            'deadline_hit': False,
+            'chains': [],
+            'error': f'周计划配置不合法: {e}',
+        })
         return EXIT_CONFIG_ERROR
 
     if not chains:
@@ -93,31 +143,66 @@ def run_plan_once(
 
     log_line(describe_schedule(run_config, date))
     missing = split_missing_chains(chains)
+    plan_chains: list[dict] = []
     if missing:
         log_line(
             f'以下脚本链在 config/script_chain 下不存在，已跳过: {", ".join(missing)}',
             level='ERROR',
         )
+        plan_chains.extend(
+            {'chain': name, 'exit_code': EXIT_CONFIG_ERROR, 'note': '脚本链配置不存在'}
+            for name in missing
+        )
         chains = [name for name in chains if name not in missing]
         if not chains:
+            _write_plan_report({
+                'date': date.isoformat(),
+                'weekday': _WEEKDAY_NAMES[date.weekday()],
+                'exit_code': EXIT_CONFIG_ERROR,
+                'deadline_hit': False,
+                'chains': plan_chains,
+            })
             return EXIT_CONFIG_ERROR
 
     exit_code = EXIT_OK
+    deadline_hit = False
     for index, chain_name in enumerate(chains):
         if deadline_at is not None and time.time() >= deadline_at:
             remaining = ', '.join(chains[index:])
             log_line(f'到达全局截止时间，未执行脚本链: {remaining}', level='ERROR')
+            plan_chains.extend(
+                {'chain': name, 'exit_code': EXIT_DEADLINE, 'note': '到达全局截止时间，未执行'}
+                for name in chains[index:]
+            )
             exit_code = EXIT_DEADLINE
+            deadline_hit = True
             break
 
-        code = run_chain_process(chain_name, deadline_at=deadline_at)
+        report_path = _state_dir() / f'chain-{chain_name}.json'
+        code = run_chain_process(chain_name, deadline_at=deadline_at, report_json=str(report_path))
+        plan_chains.append({
+            'chain': chain_name,
+            'exit_code': code,
+            'report': _read_report(report_path),
+        })
         if code == EXIT_LOCKED:
             remaining = ', '.join(chains[index + 1:])
             note = f'脚本链 {chain_name} 因锁屏跳过'
             if remaining:
                 note += f'，未执行: {remaining}'
             log_line(note, level='ERROR')
+            plan_chains.extend(
+                {'chain': name, 'exit_code': EXIT_LOCKED, 'note': '锁屏跳过，未执行'}
+                for name in chains[index + 1:]
+            )
             log_line(f'本轮结束 exit_code={EXIT_LOCKED}', level='ERROR')
+            _write_plan_report({
+                'date': date.isoformat(),
+                'weekday': _WEEKDAY_NAMES[date.weekday()],
+                'exit_code': EXIT_LOCKED,
+                'deadline_hit': False,
+                'chains': plan_chains,
+            })
             return EXIT_LOCKED
         if code == EXIT_DEADLINE:
             remaining = ', '.join(chains[index + 1:])
@@ -125,11 +210,23 @@ def run_plan_once(
             if remaining:
                 note += f'，未执行: {remaining}'
             log_line(note, level='ERROR')
+            plan_chains.extend(
+                {'chain': name, 'exit_code': EXIT_DEADLINE, 'note': '到达全局截止时间，未执行'}
+                for name in chains[index + 1:]
+            )
             exit_code = EXIT_DEADLINE
+            deadline_hit = True
             break
         if code != EXIT_OK and exit_code == EXIT_OK:
             exit_code = code
 
+    _write_plan_report({
+        'date': date.isoformat(),
+        'weekday': _WEEKDAY_NAMES[date.weekday()],
+        'exit_code': exit_code,
+        'deadline_hit': deadline_hit,
+        'chains': plan_chains,
+    })
     log_line(f'本轮结束 exit_code={exit_code}', level='PASS' if exit_code == EXIT_OK else 'ERROR')
     return exit_code
 

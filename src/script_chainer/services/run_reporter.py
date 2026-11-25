@@ -24,6 +24,9 @@ DEFAULT_EVENTS_NAME = 'run-events.jsonl'
 DEFAULT_REPORT_NAME = 'last-report.json'
 """默认运行报告文件名，位于 `config/state` 下。"""
 
+DEFAULT_REPORT_TEXT_NAME = 'last-report.txt'
+"""默认文本报告文件名，位于 `config/state` 下，供推送模块直接读取。"""
+
 EVENT_PREFIX = '[event] '
 """事件行前缀，便于外部按前缀提取结构化数据。"""
 
@@ -89,6 +92,7 @@ class RunReporter:
     chain_name: str
     events_path: Path | None = None
     report_path: Path | None = None
+    report_text_path: Path | None = None
     started_at: str = ''
     started_ts: float = 0.0
     records: list[ScriptRecord] = field(default_factory=list)
@@ -103,6 +107,10 @@ class RunReporter:
             self.report_path = _state_dir() / DEFAULT_REPORT_NAME
         else:
             self.report_path = Path(self.report_path)
+        if self.report_text_path is None:
+            self.report_text_path = _state_dir() / DEFAULT_REPORT_TEXT_NAME
+        else:
+            self.report_text_path = Path(self.report_text_path)
 
     # ------------------------------------------------------------------
     # 事件写入
@@ -230,6 +238,7 @@ class RunReporter:
             'summary': report['summary'],
         })
         self._write_report(report)
+        self._write_text(build_chain_text(report))
         return report
 
     # ------------------------------------------------------------------
@@ -309,3 +318,105 @@ class RunReporter:
                 json.dump(report, f, ensure_ascii=False, indent=2)
         except OSError:
             pass
+
+    def _write_text(self, text: str) -> None:
+        try:
+            self.report_text_path.parent.mkdir(parents=True, exist_ok=True)
+            with open(self.report_text_path, 'w', encoding='utf-8') as f:
+                f.write(text)
+        except OSError:
+            pass
+
+
+def build_chain_text(report: dict) -> str:
+    """把单链报告渲染成便于推送的纯文本。
+
+    第一行即结论，例如「脚本链 genshin-my 1/1 成功」或
+    「脚本链 honkai3-daily 0/1 失败」，后面按脚本列出明细与错误首条。
+    """
+    scripts = report.get('scripts') or []
+    total = len(scripts)
+    ok_count = sum(1 for record in scripts if run_verdict.is_ok(record.get('verdict', '')))
+    failed = [record for record in scripts if not run_verdict.is_ok(record.get('verdict', ''))]
+
+    head = f'脚本链 {report.get("chain", "")} {ok_count}/{total} 成功'
+    if failed:
+        head = f'脚本链 {report.get("chain", "")} {ok_count}/{total} 失败'
+
+    lines = [head]
+    lines.append(
+        f'开始 {report.get("started_at", "")} 结束 {report.get("ended_at", "")} '
+        f'耗时 {report.get("duration_sec", 0)}s 退出码 {report.get("exit_code", "")}'
+    )
+
+    summary = report.get('summary') or {}
+    summary_text = '，'.join(
+        f'{run_verdict.label(verdict)} {summary[verdict]}'
+        for verdict in run_verdict.LABELS
+        if summary.get(verdict)
+    )
+    if summary_text:
+        lines.append(f'汇总 {summary_text}')
+
+    for record in scripts:
+        verdict = record.get('verdict', '')
+        detail = (
+            f'  [{record.get("index")}] {record.get("display_name") or record.get("script_path")} '
+            f'{run_verdict.label(verdict)}'
+        )
+        if record.get('end_reason'):
+            detail += f'({record["end_reason"]})'
+        detail += f' {record.get("duration_sec", 0)}s'
+        if record.get('retry_round'):
+            detail += f' 第{record["retry_round"]}轮重跑'
+        if not run_verdict.is_ok(verdict) and record.get('error_summary'):
+            detail += f'：{record["error_summary"]}'
+        lines.append(detail)
+
+    if report.get('deadline_hit'):
+        lines.append('到达全局截止时间，后续脚本与重试未执行')
+
+    return '\n'.join(lines) + '\n'
+
+
+def build_plan_text(plan: dict) -> str:
+    """把一次周计划执行结果渲染成纯文本报告。
+
+    每条链一行结论，例如「链 genshin-my 1/1 成功」、
+    「链 honkai3-daily 0/1 失败：任务 'x' 执行失败」。
+    """
+    chains = plan.get('chains') or []
+    lines = [
+        f'计划 {plan.get("date", "")} {plan.get("weekday", "")} '
+        f'退出码 {plan.get("exit_code", "")}'
+    ]
+    if plan.get('error'):
+        lines.append(f'配置问题：{plan["error"]}')
+
+    for item in chains:
+        name = item.get('chain', '')
+        report = item.get('report')
+        if report:
+            scripts = report.get('scripts') or []
+            ok_count = sum(
+                1 for record in scripts if run_verdict.is_ok(record.get('verdict', ''))
+            )
+            head = f'链 {name} {ok_count}/{len(scripts)}'
+            head += ' 成功' if ok_count == len(scripts) else ' 失败'
+            failures = [
+                record for record in scripts
+                if not run_verdict.is_ok(record.get('verdict', ''))
+            ]
+            if failures:
+                first = failures[0]
+                reason = first.get('error_summary') or run_verdict.label(first.get('verdict', ''))
+                head += f'：{reason}'
+            lines.append(head)
+        else:
+            note = item.get('note') or '无运行报告'
+            lines.append(f'链 {name} 未执行：{note}')
+
+    if plan.get('deadline_hit'):
+        lines.append('到达全局截止时间，后续脚本链与重试未执行')
+
+    return '\n'.join(lines) + '\n'

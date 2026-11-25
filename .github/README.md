@@ -110,6 +110,8 @@ stall:                                  # 卡死 / 原地打转检测
 | `--daemon --wait` | 已有实例在运行时，等待其退出后接管 |
 | `--plan` | 按今日计划执行一次后退出，适合手动补跑 |
 | `--report-json <path>` | 指定运行报告 JSON 输出路径，默认 `config/state/last-report.json` |
+| `--report-text <path>` | 指定运行报告文本输出路径，默认 `config/state/last-report.txt` |
+| `--replay <log> --chain <链名>` | 离线回放历史日志，用线上同一套规则重新判定，不启动任何脚本 |
 | `--autostart on` | 开启开机自启，并写入 `config/run.yml` |
 | `--autostart off` | 关闭开机自启，并写入 `config/run.yml` |
 
@@ -148,9 +150,21 @@ stall:                                  # 卡死 / 原地打转检测
 
 - 事件流：`config/state/run-events.jsonl`，每行一个 JSON，每次链启动时重置。
 - 汇总报告：`config/state/last-report.json`，也可用 `--report-json <path>` 指定路径。
+- 文本报告：`config/state/last-report.txt`，第一行即结论（如「脚本链 genshin-my 1/1 成功」），适合直接推送；`--report-text <path>` 可改路径。
+- 周计划汇总：常驻调度每轮把各链结果写到 `config/state/last-plan.json` 与 `last-plan.txt`，一眼看出今天哪条链失败、失败在哪一步。
 - 报告中 `summary` 给出各分类计数，`scripts` 列出每个脚本的下标、耗时、结果与错误摘要；因截止时间或中断未执行的脚本记为 `missing`。
 
 文本日志保持原样，仍可沿用旧的日志解析方式。
+
+### 日志离线回放
+
+调整 `fail_fast` / `stall` 正则时，可以用历史日志回放验证，确认没有把「正常恢复」误判成失败：
+
+```powershell
+python -m script_chainer.win_exe.script_runner --replay .log/script_chainer_runner.log --chain genshin-my --debug-index 0
+```
+
+回放复用线上同一个 `LogRuleMonitor`，读取 `--chain` / `--debug-index` 对应的脚本规则，输出判定结果、错误首条与打转次数排行。退出码 0 表示未命中规则，1 表示判定失败，2 表示日志或配置读取失败。
 
 ### 失败脚本级重跑
 

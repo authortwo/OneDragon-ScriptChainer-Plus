@@ -9,6 +9,8 @@ def build_runner_command(
     chain_name: str,
     script_index: int | None = None,
     deadline_at: float | None = None,
+    report_json: str | None = None,
+    report_text: str | None = None,
 ) -> tuple[list[str], str | None]:
     """构造 runner 启动命令。
 
@@ -16,6 +18,8 @@ def build_runner_command(
         chain_name: 脚本链名称。
         script_index: 调试脚本下标，None 表示运行整个脚本链。
         deadline_at: 全局截止时间戳（秒），由常驻调度传入，None 表示由 runner 自行计算。
+        report_json: 运行报告 JSON 输出路径，None 表示写入默认位置。
+        report_text: 运行报告文本输出路径，None 表示写入默认位置。
 
     Returns:
         启动命令及其工作目录。
@@ -25,6 +29,10 @@ def build_runner_command(
         common_args.extend(["--debug-index", str(script_index)])
     if deadline_at is not None:
         common_args.extend(["--deadline-at", str(int(deadline_at))])
+    if report_json is not None:
+        common_args.extend(["--report-json", report_json])
+    if report_text is not None:
+        common_args.extend(["--report-text", report_text])
 
     # 可执行文件模式
     if getattr(sys, 'frozen', False):

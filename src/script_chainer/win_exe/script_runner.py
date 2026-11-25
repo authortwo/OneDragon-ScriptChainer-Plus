@@ -178,13 +178,35 @@ _exit_controller = _RunnerExitController()
 
 def parse_args():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--chain', type=str, default='01', help='脚本链名称')
+    parser.add_argument('--chain', type=str, default=None, help='脚本链名称，默认 01')
     parser.add_argument('-s', '--shutdown', type=int, nargs='?', const=60, help='运行后关机延迟秒数，默认60秒')
     parser.add_argument('--debug-index', type=int, default=None, help='仅调试指定下标脚本，并按挂靠关系一并编排（禁用项仍会跳过）')
     parser.add_argument('--deadline-at', type=float, default=None, help='全局截止时间戳（秒），由常驻调度传入')
     parser.add_argument('--report-json', type=str, default=None, help='运行报告 JSON 输出路径')
+    parser.add_argument('--report-text', type=str, default=None, help='运行报告文本输出路径')
+    parser.add_argument('--replay', type=str, default=None, help='离线回放历史日志，用同一套规则重新判定')
 
     return parser.parse_args()
+
+
+def run_replay(log_path: str, chain: str = '', script_index: int | None = None) -> int:
+    """离线回放历史日志（F-16），输出判定、错误首条与打转统计。
+
+    Returns:
+        0 表示未命中任何规则；1 表示判定为失败；2 表示日志或配置读取失败。
+    """
+    from script_chainer.services.log_replay import replay_log
+
+    configure_runner_runtime_logging()
+    try:
+        result = replay_log(log_path, chain=chain, script_index=script_index)
+    except FileNotFoundError as e:
+        print_message(str(e), level='ERROR')
+        return EXIT_CONFIG_ERROR
+
+    for line in result.describe().splitlines():
+        print(line)
+    return EXIT_OK if result.ok else EXIT_SCRIPT_FAILED
 
 
 def print_message(message: str, level="INFO"):
@@ -210,6 +232,21 @@ def _push_chain_notification(
         title=ctx.notify_config.title,
         content=f'脚本链 {chain_name} {action}: {script_config.script_display_name}',
     )
+
+
+def _push_chain_report(ctx: ScriptChainerContext | None, report: dict) -> None:
+    """把链级汇总报告推送出去，外部不必再解析日志。"""
+    if ctx is None or not report:
+        return
+    from script_chainer.services.run_reporter import build_chain_text
+
+    try:
+        ctx.push_service.push_async(
+            title=f'{ctx.notify_config.title} - 脚本链 {report.get("chain", "")}',
+            content=build_chain_text(report).strip(),
+        )
+    except Exception:
+        log.error('推送运行报告失败', exc_info=True)
 
 
 def _make_stdout_callback(
@@ -1110,6 +1147,7 @@ def run_chain(
     debug_index: int | None = None,
     deadline_at: float | None = None,
     report_json: str | None = None,
+    report_text: str | None = None,
 ) -> int:
     """运行指定的脚本链。
 
@@ -1120,6 +1158,7 @@ def run_chain(
             并按编排/挂靠关系一并纳入与其关联的脚本。
         deadline_at: 全局截止时间戳（秒），由常驻调度传入；None 时按 deadline_minutes 自行计算。
         report_json: 汇总报告输出路径，None 时写入 `config/state/last-report.json`。
+        report_text: 文本报告输出路径，None 时写入 `config/state/last-report.txt`。
 
     Returns:
         0 表示全部脚本成功；1 表示存在失败脚本；2 表示配置错误；
@@ -1166,7 +1205,7 @@ def run_chain(
         log.error(f'初始化上下文实例失败: {e}')
 
     privacy_screen = PrivacyScreen(close_key=_get_privacy_screen_close_key())
-    reporter = RunReporter(chain_name=chain_name, report_path=report_json)
+    reporter = RunReporter(chain_name=chain_name, report_path=report_json, report_text_path=report_text)
 
     exit_code = 0
     try:
@@ -1177,7 +1216,8 @@ def run_chain(
                 print_message(f'可用脚本链: {", ".join(available)}', "INFO")
             exit_code = EXIT_CONFIG_ERROR
             reporter.chain_started()
-            reporter.chain_finished(exit_code)
+            report = reporter.chain_finished(exit_code)
+            _push_chain_report(ctx, report)
         else:
             attach_targets = chain_config.compute_attach_targets()
             try:
@@ -1189,7 +1229,8 @@ def run_chain(
             except ValueError as e:
                 print_message(str(e), 'ERROR')
                 reporter.chain_started()
-                reporter.chain_finished(EXIT_CONFIG_ERROR)
+                report = reporter.chain_finished(EXIT_CONFIG_ERROR)
+                _push_chain_report(ctx, report)
                 return EXIT_CONFIG_ERROR
 
             if selection.debug_target is not None:
@@ -1319,10 +1360,11 @@ def run_chain(
                 # 重跑后已无失败脚本，恢复为全部成功
                 exit_code = EXIT_OK
 
-            reporter.chain_finished(exit_code, deadline_hit=deadline_hit)
+            report = reporter.chain_finished(exit_code, deadline_hit=deadline_hit)
             summary = reporter.describe()
             if summary:
                 print_message(summary, level='ERROR' if exit_code != EXIT_OK else 'PASS')
+            _push_chain_report(ctx, report)
             privacy_screen.stop()
 
         if shutdown_delay > 0:
@@ -1345,12 +1387,15 @@ def run_chain(
 def run():
     """独立运行入口"""
     args = parse_args()
+    if args.replay is not None:
+        sys.exit(run_replay(args.replay, chain=args.chain or '', script_index=args.debug_index))
     exit_code = run_chain(
-        chain_name=args.chain,
+        chain_name=args.chain or '01',
         shutdown_delay=args.shutdown if args.shutdown else 0,
         debug_index=args.debug_index,
         deadline_at=args.deadline_at,
         report_json=args.report_json,
+        report_text=args.report_text,
     )
     sys.exit(exit_code)
 
