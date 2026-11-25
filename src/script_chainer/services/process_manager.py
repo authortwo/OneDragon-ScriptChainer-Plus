@@ -38,6 +38,7 @@ from __future__ import annotations
 import atexit
 import ctypes
 import ctypes.wintypes
+import os
 import subprocess
 import sys
 import threading
@@ -189,6 +190,80 @@ def is_process_existed(process_name: str | list[str] | None) -> bool:
         进程是否存在。
     """
     return find_process_by_infos(build_process_infos(process_name)) is not None
+
+
+def _is_under_dir(path: str, directory: str) -> bool:
+    """判断路径是否位于指定目录之下（含大小写与分隔符处理）。
+
+    必须以「目录 + 分隔符」为前缀，避免 `OneDragon2` 被 `OneDragon` 误伤。
+    """
+    try:
+        candidate = Path(path).resolve()
+        base = Path(directory).resolve()
+    except (OSError, ValueError):
+        return False
+    try:
+        candidate.relative_to(base)
+    except ValueError:
+        return False
+    return True
+
+
+def find_processes_under_dir(
+    directory: str,
+    name_prefixes: tuple[str, ...] = ('python',),
+) -> list[psutil.Process]:
+    """查找可执行文件位于指定目录下、名称匹配前缀的进程。
+
+    用于清理「启动器已退出但 python 仍死循环」的孤儿进程：按目录过滤，
+    不会误伤同机其它 python。
+
+    Args:
+        directory: 脚本所在目录。
+        name_prefixes: 进程名前缀（小写比较），默认匹配 python/pythonw。
+
+    Returns:
+        匹配的进程列表（已排除当前进程）。
+    """
+    if not directory:
+        return []
+
+    current_pid = os.getpid()
+    matched: list[psutil.Process] = []
+    for proc in psutil.process_iter(['pid', 'name', 'exe']):
+        if proc.pid == current_pid:
+            continue
+        try:
+            name = (proc.info.get('name') or '').lower()
+            if not any(name.startswith(prefix) for prefix in name_prefixes):
+                continue
+            exe = proc.info.get('exe')
+            if not exe or not _is_under_dir(exe, directory):
+                continue
+        except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+            continue
+        matched.append(proc)
+    return matched
+
+
+def kill_processes_under_dir(
+    directory: str,
+    name_prefixes: tuple[str, ...] = ('python',),
+    graceful_timeout: float = 3,
+) -> list[int]:
+    """终止可执行文件位于指定目录下的进程，返回被清理的 PID。
+
+    Args:
+        directory: 脚本所在目录。
+        name_prefixes: 进程名前缀。
+        graceful_timeout: 优雅终止等待时间（秒）。
+    """
+    killed: list[int] = []
+    for proc in find_processes_under_dir(directory, name_prefixes):
+        pid = proc.pid
+        graceful_kill_psutil(proc, graceful_timeout)
+        killed.append(pid)
+    return killed
 
 
 class ProcessManager:

@@ -39,6 +39,7 @@ from script_chainer.services.process_manager import (
     build_process_infos,
     find_process_by_infos,
     is_process_existed,
+    kill_processes_under_dir,
 )
 from script_chainer.utils.console_close_utils import force_exit_on_console_close
 from script_chainer.utils.privacy_screen import DEFAULT_CLOSE_KEY, PrivacyScreen
@@ -570,7 +571,10 @@ def _monitor_script_done(
 def _cleanup_processes(script_config: ScriptConfig, pm: ProcessManager, force_script: bool = False) -> None:
     """清理脚本和游戏进程。
 
-    通过 ProcessManager.kill() 精确终止已追踪的进程及其子进程树（基于 PID）。
+    优先通过 ProcessManager.kill() 精确终止已追踪的进程及其子进程树（基于 PID）；
+    若脚本启用了 kill_process_tree，再按「可执行文件位于脚本目录下」兜底清理，
+    覆盖「启动器已退出但 venv python 仍死循环」的孤儿进程，同时不会误伤同机
+    其它目录的 python。
 
     Args:
         script_config: 脚本配置。
@@ -583,6 +587,9 @@ def _cleanup_processes(script_config: ScriptConfig, pm: ProcessManager, force_sc
             pm.kill()
         except Exception:
             log.error('通过 ProcessManager 关闭脚本进程失败', exc_info=True)
+
+        if script_config.kill_process_tree:
+            _cleanup_orphan_processes(script_config)
 
     if script_config.kill_game_after_done:
         game_name = script_config.game_process_name
@@ -599,6 +606,25 @@ def _cleanup_processes(script_config: ScriptConfig, pm: ProcessManager, force_sc
                             proc.kill()
             except Exception:
                 log.error('关闭游戏进程失败', exc_info=True)
+
+
+def _cleanup_orphan_processes(script_config: ScriptConfig) -> None:
+    """按脚本目录兜底清理残留的 python 进程。"""
+    script_path = script_config.script_path
+    if not script_path:
+        return
+    script_dir = str(Path(script_path).parent)
+    if not Path(script_dir).is_dir():
+        return
+    try:
+        killed = kill_processes_under_dir(script_dir)
+    except Exception:
+        log.error('按目录清理残留进程失败', exc_info=True)
+        return
+    if killed:
+        print_message(
+            f'按目录兜底清理 {script_dir} 下的残留进程: {", ".join(str(pid) for pid in killed)}'
+        )
 
 
 def _run_script_once(
