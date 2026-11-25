@@ -432,6 +432,15 @@ class EditorSettingInterface(VerticalScrollInterface):
         self.start_daemon_card.clicked.connect(self._on_start_daemon_clicked)
         group.addSettingCard(self.start_daemon_card)
 
+        self.run_now_card = PushSettingCard(
+            icon=FluentIcon.SYNC,
+            title='立即运行一次',
+            content='按今日周计划立即补跑：忽略时间窗与每日一次，跑完不关机',
+            text='运行',
+        )
+        self.run_now_card.clicked.connect(self._on_run_now_clicked)
+        group.addSettingCard(self.run_now_card)
+
         return group
 
     def reload_run_options(self) -> None:
@@ -498,6 +507,17 @@ class EditorSettingInterface(VerticalScrollInterface):
             self.start_daemon_card.setContent(error)
             return
         self.start_daemon_card.setContent('已拉起常驻调度进程；若已有一个实例在运行，新实例会自动退出')
+
+    def _on_run_now_clicked(self) -> None:
+        """立即补跑今日计划：忽略时间窗与每日一次，不关机。"""
+        from script_chainer.services.autostart import launch_plan_now
+
+        error = launch_plan_now()
+        if error is not None:
+            log.error(error)
+            self.run_now_card.setContent(error)
+            return
+        self.run_now_card.setContent('已拉起补跑进程：忽略时间窗与每日一次，跑完不关机')
 
     def get_schedule_group(self) -> SettingCardGroup:
         group = SettingCardGroup(gt('周计划'))

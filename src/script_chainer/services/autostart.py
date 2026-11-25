@@ -30,11 +30,25 @@ def build_daemon_argv() -> tuple[list[str], str | None]:
     Returns:
         (参数列表, 工作目录)，工作目录为 None 表示沿用当前目录。
     """
+    return _build_launcher_argv('--daemon')
+
+
+def build_plan_now_argv() -> tuple[list[str], str | None]:
+    """构造「立即运行一次」的启动命令：忽略时间窗与每日一次，不关机。
+
+    Returns:
+        (参数列表, 工作目录)，工作目录为 None 表示沿用当前目录。
+    """
+    return _build_launcher_argv('--plan', '--run-now')
+
+
+def _build_launcher_argv(*extra_args: str) -> tuple[list[str], str | None]:
+    """构造带附加参数的后台启动命令。"""
     if getattr(sys, 'frozen', False):
-        return [sys.executable, '--daemon'], None
+        return [sys.executable, *extra_args], None
 
     work_dir = os_utils.get_path_under_work_dir('src')
-    return [sys.executable, '-m', 'script_chainer.win_exe.launcher', '--daemon'], work_dir
+    return [sys.executable, '-m', 'script_chainer.win_exe.launcher', *extra_args], work_dir
 
 
 def launch_daemon_now() -> str | None:
@@ -43,9 +57,24 @@ def launch_daemon_now() -> str | None:
     Returns:
         None 表示已拉起进程，否则返回错误说明。
     """
+    argv, work_dir = build_daemon_argv()
+    return _launch_background(argv, work_dir)
+
+
+def launch_plan_now() -> str | None:
+    """立即在后台补跑一次今日计划（忽略时间窗与每日一次，不关机）。
+
+    Returns:
+        None 表示已拉起进程，否则返回错误说明。
+    """
+    argv, work_dir = build_plan_now_argv()
+    return _launch_background(argv, work_dir)
+
+
+def _launch_background(argv: list[str], work_dir: str | None) -> str | None:
+    """以脱离当前进程的方式在后台启动。"""
     import subprocess
 
-    argv, work_dir = build_daemon_argv()
     creation_flags = 0
     if sys.platform == 'win32':
         creation_flags = (
@@ -59,7 +88,7 @@ def launch_daemon_now() -> str | None:
             close_fds=True,
         )
     except OSError as e:
-        return f'启动常驻调度失败: {e}'
+        return f'启动后台进程失败: {e}'
     return None
 
 

@@ -285,11 +285,20 @@ def _acquire_lock(
     return EXIT_OK
 
 
-def run_plan_cli(run_config: RunConfig | None = None) -> int:
+def run_plan_cli(
+    run_config: RunConfig | None = None,
+    ignore_window: bool = False,
+    ignore_once_per_day: bool = False,
+) -> int:
     """`--plan` 入口：按今日周计划执行一次，尊重时间窗与每日一次。
 
     时间窗外或今日已完成时直接退出（退出码 0 并输出一行说明）。
     实际互斥由每条链的 Runner 单实例锁保证。
+
+    Args:
+        run_config: 运行配置，缺省时读取 config/run.yml。
+        ignore_window: 忽略时间窗限制，等价于外挂的 Run-Now（立即补跑）。
+        ignore_once_per_day: 忽略每日一次限制，即使今天已完成也重新执行。
     """
     run_config = run_config or RunConfig()
 
@@ -299,6 +308,13 @@ def run_plan_cli(run_config: RunConfig | None = None) -> int:
             log_line(issue, level='ERROR')
         return EXIT_CONFIG_ERROR
 
+    if ignore_window and ignore_once_per_day:
+        log_line('立即运行：忽略时间窗与每日一次限制')
+    elif ignore_window:
+        log_line('立即运行：忽略时间窗限制')
+    elif ignore_once_per_day:
+        log_line('立即运行：忽略每日一次限制')
+
     try:
         window = run_config.run_window
     except ValueError as e:
@@ -307,12 +323,13 @@ def run_plan_cli(run_config: RunConfig | None = None) -> int:
 
     now = datetime.datetime.now()
     today = now.date()
-    if window is not None and not window.contains(now):
+    if window is not None and not ignore_window and not window.contains(now):
         log_line(f'当前不在时间窗 {window.describe()} 内，跳过本次执行')
         return EXIT_OK
 
     state = DailyRunState()
-    should_start, reason = state.should_start(today, run_config.once_per_day)
+    once_per_day = run_config.once_per_day and not ignore_once_per_day
+    should_start, reason = state.should_start(today, once_per_day)
     if not should_start:
         log_line(f'{today.isoformat()} {reason}，跳过本次执行')
         return EXIT_OK
@@ -331,7 +348,10 @@ def run_plan_cli(run_config: RunConfig | None = None) -> int:
     exit_code = EXIT_CONFIG_ERROR
     try:
         exit_code = run_plan_once(
-            run_config, today, deadline_at=_round_deadline(run_config, window, now),
+            run_config, today,
+            deadline_at=_round_deadline(
+                run_config, None if ignore_window else window, now,
+            ),
         )
     except Exception as e:  # 单次执行异常不应吞掉退出码
         log_line(f'本轮执行异常: {e}', level='ERROR')

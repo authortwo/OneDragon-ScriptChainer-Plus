@@ -54,6 +54,11 @@ class ScriptChainerLauncher(ExeLauncher):
             help="按今日周计划执行一次后退出（适合手动补跑或外部触发）",
         )
         parser.add_argument(
+            "--run-now",
+            action="store_true",
+            help="立即按今日周计划补跑一次：忽略时间窗与每日一次，不关机（等价外挂 Run-Now.bat）",
+        )
+        parser.add_argument(
             "--wait",
             action="store_true",
             help="已有运行实例在运行时，等待其退出后接管",
@@ -174,12 +179,15 @@ class ScriptChainerLauncher(ExeLauncher):
             pyuac.runAsAdmin(sys.argv, wait=False)
             sys.exit(0)
 
-        if args.daemon or args.plan:
+        if args.daemon or args.plan or args.run_now:
             from script_chainer.win_exe.scheduler_daemon import run_daemon, run_plan_cli
 
             if args.daemon:
                 sys.exit(run_daemon(wait=args.wait, fail_fast=args.fail_fast))
-            sys.exit(run_plan_cli())
+            sys.exit(run_plan_cli(
+                ignore_window=args.run_now,
+                ignore_once_per_day=args.run_now,
+            ))
 
         if not args.onedragon and args.shutdown:
             print("错误：参数 --shutdown 只能在指定 --onedragon 时使用")

@@ -92,6 +92,7 @@ F-21 之后，安装与运维相关的选项都收敛到「设置 → 运行」�
 | 锁屏处理 | `on_locked` | 跳过 / 重启一次 / 等待解锁 |
 | 结束后关机 | `shutdown_after_run` | 开启为跑完 60 秒后关机，关闭为 0 |
 | 立即启动常驻调度 | — | 直接拉起 `--daemon` 进程，无需手工创建计划任务 |
+| 立即运行一次 | — | 等价外挂的 `Run-Now.bat`：忽略时间窗与每日一次补跑，跑完不关机 |
 
 时间窗填写后会即时校验：只填一端或格式不是 `HH:MM` 时提示错误且不写入配置。
 
@@ -155,11 +156,14 @@ stall:                                  # 卡死 / 原地打转检测
 | `--daemon --wait` | 已有实例在运行时，等待其退出后接管 |
 | `--daemon --fail-fast` | 已有实例在运行时立即退出，并打印持有者 PID（退出码 5） |
 | `--plan` | 按今日计划执行一次后退出，适合手动补跑；时间窗外或今日已完成时直接退出 |
+| `--run-now` | 立即补跑今日计划：忽略时间窗与每日一次，跑完不关机（等价外挂 `Run-Now.bat`） |
 | `--report-json <path>` | 指定运行报告 JSON 输出路径，默认 `config/state/last-report.json` |
 | `--report-text <path>` | 指定运行报告文本输出路径，默认 `config/state/last-report.txt` |
 | `--replay <log> --chain <链名>` | 离线回放历史日志，用线上同一套规则重新判定，不启动任何脚本 |
 | `--autostart on` | 开启开机自启，并写入 `config/run.yml` |
 | `--autostart off` | 关闭开机自启，并写入 `config/run.yml` |
+
+单脚本调试等价外挂的 `Run-One.bat`：`--onedragon --chain <链名>` 直接运行整条链，再加 `--debug-index <下标>` 只调试指定脚本，`--shutdown <秒>` 可在结束后关机。
 
 开机自启写入当前用户注册表的 `Run` 项（`OneDragon-ScriptChainer-Scheduler`），不依赖计划任务。由于程序需要管理员权限，登录后会弹出一次 UAC 确认；无人确认时不会启动，可改用「任务计划程序 → 登录时运行 + 最高权限」实现静默自启。
 
