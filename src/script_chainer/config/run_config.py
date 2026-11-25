@@ -103,6 +103,15 @@ class RunConfig(YamlConfig):
         return self.get('once_per_day', True) is not False
 
     @property
+    def autostart_enabled(self) -> bool:
+        """是否随系统登录自动启动常驻调度。"""
+        return self.get('autostart_enabled', False) is True
+
+    @autostart_enabled.setter
+    def autostart_enabled(self, new_value: bool) -> None:
+        self.update('autostart_enabled', new_value)
+
+    @property
     def run_window(self) -> RunWindow | None:
         """运行时间窗，未配置任意一端时返回 None 表示不限时间。"""
         raw = self.get('run_window', None)

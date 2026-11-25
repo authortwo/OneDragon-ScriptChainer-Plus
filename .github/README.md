@@ -53,6 +53,7 @@
 scheduler_enabled: true      # 是否启用常驻调度
 scheduler_poll_seconds: 30   # 轮询间隔（秒）
 once_per_day: true           # 当日只跑一次；中断后自动补跑
+autostart_enabled: false     # 随系统登录自动启动常驻调度
 run_window:
   start: "04:15"             # 允许运行的时间窗，两端都留空表示不限时间
   end: "06:15"
@@ -68,6 +69,10 @@ schedule:                    # 星期 -> 脚本链列表
 | `--daemon` | 启动常驻调度（单实例，重复启动会被拒绝） |
 | `--daemon --wait` | 已有实例在运行时，等待其退出后接管 |
 | `--plan` | 按今日计划执行一次后退出，适合手动补跑 |
+| `--autostart on` | 开启开机自启，并写入 `config/run.yml` |
+| `--autostart off` | 关闭开机自启，并写入 `config/run.yml` |
+
+开机自启写入当前用户注册表的 `Run` 项（`OneDragon-ScriptChainer-Scheduler`），不依赖计划任务。由于程序需要管理员权限，登录后会弹出一次 UAC 确认；无人确认时不会启动，可改用「任务计划程序 → 登录时运行 + 最高权限」实现静默自启。
 
 当日状态记录在 `config/state/daily_run.yml`：脚本链全部成功记为「已完成」，当日不再重跑；存在失败记为「已中断」，下次轮询自动补跑。脚本链退出码为 0（全部成功）、1（存在失败脚本）、2（配置错误）。
 

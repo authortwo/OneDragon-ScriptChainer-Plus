@@ -17,6 +17,7 @@ class ScriptChainerLauncher(ExeLauncher):
     - --chain: 指定脚本链名称（仅 --onedragon 模式）
     - --daemon: 内置常驻调度，按周计划在时间窗内每天触发
     - --plan: 按今日周计划执行一次
+    - --autostart on|off: 开启/关闭随系统登录自启常驻调度
     """
 
     def __init__(self):
@@ -56,6 +57,12 @@ class ScriptChainerLauncher(ExeLauncher):
             action="store_true",
             help="常驻调度已有实例在运行时，等待其退出后接管",
         )
+        parser.add_argument(
+            "--autostart",
+            choices=("on", "off"),
+            default=None,
+            help="开启/关闭随系统登录自动启动常驻调度，并写入 config/run.yml",
+        )
 
     @staticmethod
     def _hide_console() -> None:
@@ -87,10 +94,33 @@ class ScriptChainerLauncher(ExeLauncher):
         )
         sys.exit(exit_code)
 
+    def apply_autostart_setting(self, value: str) -> None:
+        """按命令行参数开启/关闭开机自启，并同步回配置。"""
+        from script_chainer.config.run_config import RunConfig
+        from script_chainer.services.autostart import sync_autostart
+
+        enabled = value == "on"
+        run_config = RunConfig()
+        run_config.autostart_enabled = enabled
+
+        error = sync_autostart(enabled)
+        if error is not None:
+            print(f"错误：{error}")
+            sys.exit(1)
+
+        state_text = "开启" if enabled else "关闭"
+        print(f"开机自启已{state_text}（config/run.yml: autostart_enabled: {enabled}）")
+        if enabled:
+            print("提示：程序需要管理员权限，登录后可能弹出一次 UAC 确认")
+        sys.exit(0)
+
     def main(self, args) -> None:
         """执行主要逻辑，常驻调度与计划模式不进入 GUI 分支。"""
         if args.version:
             self.show_version()
+
+        if args.autostart is not None:
+            self.apply_autostart_setting(args.autostart)
 
         if not pyuac.isUserAdmin():
             pyuac.runAsAdmin(sys.argv, wait=False)

@@ -5,6 +5,7 @@ import subprocess
 import time
 
 from script_chainer.config.run_config import RunConfig
+from script_chainer.services.autostart import sync_autostart
 from script_chainer.services.chain_schedule import (
     describe_schedule,
     resolve_chains_for_date,
@@ -105,6 +106,12 @@ def run_daemon(wait: bool = False) -> int:
     if not run_config.scheduler_enabled:
         log_line('内置常驻调度未启用（scheduler_enabled: false），退出')
         return EXIT_OK
+
+    sync_error = sync_autostart(run_config.autostart_enabled)
+    if sync_error is not None:
+        log_line(sync_error, level='WARN')
+    elif run_config.autostart_enabled:
+        log_line('已确保开机自启项存在（autostart_enabled: true）')
 
     try:
         window = run_config.run_window
