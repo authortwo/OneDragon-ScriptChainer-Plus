@@ -24,6 +24,11 @@ a = Analysis(
         'uvicorn.protocols.websockets.auto',
         'uvicorn.lifespan',
         'uvicorn.lifespan.on',
+        # 用户 Python 脚本可能用到的电脑操作能力，运行器里没有静态引用，需显式收集
+        'pynput',
+        'win32clipboard',
+        'one_dragon.base.controller.pc_clipboard',
+        'one_dragon.base.controller.pc_button.pc_button_listener',
     ],
     hookspath=[],
     hooksconfig={},
