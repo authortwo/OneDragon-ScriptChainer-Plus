@@ -18,6 +18,8 @@ from script_chainer.utils.runner_utils import build_runner_command
 EXIT_OK = 0
 EXIT_RUN_FAILED = 1
 EXIT_CONFIG_ERROR = 2
+EXIT_DEADLINE = 3
+EXIT_LOCKED = 4
 
 _WEEKDAY_NAMES = ('周一', '周二', '周三', '周四', '周五', '周六', '周日')
 
@@ -31,12 +33,16 @@ def log_line(message: str, level: str = 'INFO') -> None:
     print(f'{_now()} | {level:<5} | {message}', flush=True)
 
 
-def run_chain_process(chain_name: str) -> int:
+def run_chain_process(chain_name: str, deadline_at: float | None = None) -> int:
     """以子进程方式运行单条脚本链，返回退出码。
 
     使用子进程而不是进程内调用，保证某条链崩溃不会带崩常驻调度。
+
+    Args:
+        chain_name: 脚本链名称。
+        deadline_at: 全局截止时间戳（秒），传给 runner 以约束单条链的运行时长。
     """
-    command, work_dir = build_runner_command(chain_name)
+    command, work_dir = build_runner_command(chain_name, deadline_at=deadline_at)
     log_line(f'启动脚本链 {chain_name}')
     try:
         completed = subprocess.run(command, cwd=work_dir, check=False)
@@ -55,14 +61,25 @@ def run_chain_process(chain_name: str) -> int:
 def run_plan_once(
     run_config: RunConfig | None = None,
     date: datetime.date | None = None,
+    deadline_at: float | None = None,
 ) -> int:
     """按周计划把当天的链依次跑一遍。
 
+    Args:
+        run_config: 运行配置；None 时读取 config/run.yml。
+        date: 计划日期，None 表示今天。
+        deadline_at: 全局截止时间戳（秒）；None 时按 deadline_minutes 从当前时刻计算。
+
     Returns:
-        0 表示全部成功；非 0 表示存在失败或配置问题。
+        0 表示全部成功；1 存在失败脚本；2 配置错误；
+        3 到达全局截止时间；4 锁屏阻断。
     """
     run_config = run_config or RunConfig()
     date = date or datetime.date.today()
+
+    if deadline_at is None and run_config.deadline_minutes > 0:
+        deadline_at = time.time() + run_config.deadline_minutes * 60
+        log_line(f'全局截止时间：{run_config.deadline_minutes} 分钟后')
 
     try:
         chains = resolve_chains_for_date(run_config, date)
@@ -86,8 +103,30 @@ def run_plan_once(
             return EXIT_CONFIG_ERROR
 
     exit_code = EXIT_OK
-    for chain_name in chains:
-        code = run_chain_process(chain_name)
+    for index, chain_name in enumerate(chains):
+        if deadline_at is not None and time.time() >= deadline_at:
+            remaining = ', '.join(chains[index:])
+            log_line(f'到达全局截止时间，未执行脚本链: {remaining}', level='ERROR')
+            exit_code = EXIT_DEADLINE
+            break
+
+        code = run_chain_process(chain_name, deadline_at=deadline_at)
+        if code == EXIT_LOCKED:
+            remaining = ', '.join(chains[index + 1:])
+            note = f'脚本链 {chain_name} 因锁屏跳过'
+            if remaining:
+                note += f'，未执行: {remaining}'
+            log_line(note, level='ERROR')
+            log_line(f'本轮结束 exit_code={EXIT_LOCKED}', level='ERROR')
+            return EXIT_LOCKED
+        if code == EXIT_DEADLINE:
+            remaining = ', '.join(chains[index + 1:])
+            note = f'脚本链 {chain_name} 到达全局截止时间收尾'
+            if remaining:
+                note += f'，未执行: {remaining}'
+            log_line(note, level='ERROR')
+            exit_code = EXIT_DEADLINE
+            break
         if code != EXIT_OK and exit_code == EXIT_OK:
             exit_code = code
 
@@ -128,8 +167,11 @@ def run_daemon(wait: bool = False) -> int:
     poll_seconds = run_config.scheduler_poll_seconds
     window_text = window.describe() if window is not None else '不限时间'
 
+    deadline_text = (f'{run_config.deadline_minutes}分钟'
+                     if run_config.deadline_minutes > 0 else '不限')
     log_line(f'常驻调度已启动：时间窗 {window_text}，轮询 {poll_seconds}s，'
-             f'每日一次={run_config.once_per_day}')
+             f'每日一次={run_config.once_per_day}，全局截止={deadline_text}，'
+             f'锁屏策略={run_config.on_locked}')
 
     last_note = ''
     try:

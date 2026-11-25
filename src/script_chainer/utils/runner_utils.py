@@ -5,12 +5,17 @@ import sys
 from one_dragon.utils.os_utils import get_path_under_work_dir
 
 
-def build_runner_command(chain_name: str, script_index: int | None = None) -> tuple[list[str], str | None]:
+def build_runner_command(
+    chain_name: str,
+    script_index: int | None = None,
+    deadline_at: float | None = None,
+) -> tuple[list[str], str | None]:
     """构造 runner 启动命令。
 
     Args:
         chain_name: 脚本链名称。
         script_index: 调试脚本下标，None 表示运行整个脚本链。
+        deadline_at: 全局截止时间戳（秒），由常驻调度传入，None 表示由 runner 自行计算。
 
     Returns:
         启动命令及其工作目录。
@@ -18,6 +23,8 @@ def build_runner_command(chain_name: str, script_index: int | None = None) -> tu
     common_args = ["--onedragon", "--chain", chain_name]
     if script_index is not None:
         common_args.extend(["--debug-index", str(script_index)])
+    if deadline_at is not None:
+        common_args.extend(["--deadline-at", str(int(deadline_at))])
 
     # 可执行文件模式
     if getattr(sys, 'frozen', False):

@@ -15,7 +15,7 @@ from typing import TextIO
 
 from colorama import Fore, Style, init
 
-from one_dragon.utils import cmd_utils
+from one_dragon.utils import cmd_utils, os_utils
 from one_dragon.base.config.config_item import get_config_item_from_enum
 from script_chainer.config.run_config import RunConfig
 from script_chainer.config.script_config import (
@@ -26,6 +26,7 @@ from script_chainer.config.script_config import (
     ScriptType,
 )
 from script_chainer.context.script_chainer_context import ScriptChainerContext
+from script_chainer.services import run_verdict
 from script_chainer.services.chain_schedule import list_available_chains
 from script_chainer.services.log_notifier import LogNotifier
 from script_chainer.services.process_manager import (
@@ -47,10 +48,17 @@ from script_chainer.utils.runtime_group_utils import (
     resolve_runtime_groups,
 )
 from script_chainer.utils.wait_utils import wait_with_cancel
+from script_chainer.services.win_desktop import detect_lock
 from script_chainer.win_exe.runner_logging import (
     configure_runner_runtime_logging,
     log,
 )
+
+EXIT_OK = 0
+EXIT_SCRIPT_FAILED = 1
+EXIT_CONFIG_ERROR = 2
+EXIT_DEADLINE = 3
+EXIT_LOCKED = 4
 
 # 当前活跃的 ProcessManager，用于信号处理时清理
 _active_pm: ProcessManager | None = None
@@ -58,6 +66,10 @@ _active_pm: ProcessManager | None = None
 
 class _NoLogTimeoutError(Exception):
     """脚本长时间无日志输出时抛出，触发外层重试。"""
+
+
+class _DeadlineReachedError(Exception):
+    """到达全局截止时间时抛出，用于终止当前脚本并停止后续脚本。"""
 
 
 @dataclass
@@ -149,6 +161,7 @@ def parse_args():
     parser.add_argument('--chain', type=str, default='01', help='脚本链名称')
     parser.add_argument('-s', '--shutdown', type=int, nargs='?', const=60, help='运行后关机延迟秒数，默认60秒')
     parser.add_argument('--debug-index', type=int, default=None, help='仅调试指定下标脚本，并按挂靠关系一并编排（禁用项仍会跳过）')
+    parser.add_argument('--deadline-at', type=float, default=None, help='全局截止时间戳（秒），由常驻调度传入')
 
     return parser.parse_args()
 
@@ -326,6 +339,7 @@ def _monitor_script_done(
     script_config: ScriptConfig,
     state: _RunMonitorState,
     pm: ProcessManager,
+    deadline_at: float | None = None,
 ) -> bool:
     """监控脚本运行状态，等待完成条件满足。
 
@@ -333,6 +347,7 @@ def _monitor_script_done(
         script_config: 脚本配置。
         state: 运行监控状态（跨 _wait_for_subprocess_ready 持久化的进程存在标志）。
         pm: 当前脚本对应的进程管理器。
+        deadline_at: 全局截止时间戳（秒），到达后抛出 _DeadlineReachedError。
 
     Returns:
         是否按完成条件正常结束；运行超时或完成条件非法时返回 False。
@@ -422,6 +437,14 @@ def _monitor_script_done(
         if is_done:
             return True
 
+        # 全局截止时间检查：到点后终止当前脚本，不再启动后续脚本
+        if deadline_at is not None and now >= deadline_at:
+            print_message(
+                f'到达全局截止时间，终止当前脚本 {script_config.script_display_name}',
+                level='ERROR',
+            )
+            raise _DeadlineReachedError()
+
         # 静默超时检查（无日志输出超时，触发重启）
         if (
             no_log_timeout > 0
@@ -476,7 +499,8 @@ def _cleanup_processes(script_config: ScriptConfig, pm: ProcessManager, force_sc
 def _run_script_once(
     script_config: ScriptConfig,
     log_notifier: LogNotifier | None = None,
-) -> bool:
+    deadline_at: float | None = None,
+) -> str:
     """运行单个脚本的一次完整生命周期。
 
     流程:
@@ -487,23 +511,24 @@ def _run_script_once(
         5. 清理进程。
 
     静默超时逻辑:
-        当 script_config.no_log_timeout_seconds > 0 时，若脚本在指定时间内没有任何
-        日志输出，则认为游戏/脚本未响应，会终止当前进程并向调用方抛出
-        _NoLogTimeoutError，由链编排层决定是否重试和发送通知。
+        脚本在 no_log_timeout_seconds（默认 300 秒，不允许关闭）内没有任何日志输出时，
+        认为游戏/脚本未响应，会终止当前进程并向调用方抛出 _NoLogTimeoutError，
+        由链编排层决定是否重试和发送通知。
 
     Args:
         script_config: 脚本配置。
         log_notifier: 可选的日志通知器，用于定时推送日志。
+        deadline_at: 全局截止时间戳（秒），到达后终止当前脚本并抛出 _DeadlineReachedError。
 
     Returns:
-        脚本是否正常结束。
+        运行结果分类（见 services.run_verdict）。
     """
     global _active_pm
 
     invalid_message = script_config.invalid_message
     if invalid_message is not None:
         print_message(f'脚本配置不合法 跳过运行 {invalid_message}')
-        return False
+        return run_verdict.CONFIG_ERROR
 
     script_path = script_config.script_path
     no_log_timeout = script_config.no_log_timeout_seconds
@@ -531,7 +556,7 @@ def _run_script_once(
         ):
             print_message(f'子进程创建失败 {script_path}', level='ERROR')
             pm.kill()
-            return False
+            return run_verdict.ENV_ERROR
 
         print_message(f'脚本子进程创建成功 {script_path}', level='PASS')
         if no_log_timeout > 0:
@@ -539,14 +564,14 @@ def _run_script_once(
 
         # 3. 监控脚本运行状态
         try:
-            finished_normally = _monitor_script_done(script_config, state, pm)
-        except _NoLogTimeoutError:
+            finished_normally = _monitor_script_done(script_config, state, pm, deadline_at=deadline_at)
+        except (_NoLogTimeoutError, _DeadlineReachedError):
             _cleanup_processes(script_config, pm, force_script=True)
             raise
 
         # 4. 清理进程（正常退出路径）
         _cleanup_processes(script_config, pm)
-        return finished_normally
+        return run_verdict.OK if finished_normally else run_verdict.FAIL
     finally:
         _active_pm = None
 
@@ -556,11 +581,14 @@ def _run_external_script_with_retries(
     log_notifier: LogNotifier | None = None,
     ctx: ScriptChainerContext | None = None,
     chain_name: str = '',
-) -> bool:
+    deadline_at: float | None = None,
+) -> str:
     """运行外部脚本，并在静默超时时按配置重试。
 
+    只有「无日志超时」会重试；配置错误与环境故障重试也无法恢复，直接返回分类。
+
     Returns:
-        脚本是否正常结束（含重试后成功）。
+        运行结果分类（见 services.run_verdict）。
     """
     max_retries = (
         script_config.no_log_max_retries
@@ -584,7 +612,7 @@ def _run_external_script_with_retries(
                     script_config,
                 )
         try:
-            return _run_script_once(script_config, log_notifier)
+            return _run_script_once(script_config, log_notifier, deadline_at=deadline_at)
         except _NoLogTimeoutError:
             if retry_count < max_retries:
                 continue
@@ -593,7 +621,7 @@ def _run_external_script_with_retries(
                 f'{script_config.script_display_name}',
                 level='ERROR',
             )
-            return False
+            return run_verdict.FAIL
 
 
 def _run_script_in_group(
@@ -602,11 +630,12 @@ def _run_script_in_group(
     ctx: ScriptChainerContext | None = None,
     chain_name: str = '',
     privacy_screen: PrivacyScreen | None = None,
-) -> bool:
+    deadline_at: float | None = None,
+) -> str:
     """运行运行组中的单个脚本。
 
     Returns:
-        脚本是否正常结束。
+        运行结果分类（见 services.run_verdict）。
     """
     try:
         if script_config.script_type == ScriptType.PYTHON:
@@ -614,16 +643,20 @@ def _run_script_in_group(
         elif script_config.script_type == ScriptType.COMPUTER_OP:
             return _run_computer_op(script_config, privacy_screen)
         else:
-            return _run_external_script_with_retries(script_config, log_notifier, ctx, chain_name)
+            return _run_external_script_with_retries(
+                script_config, log_notifier, ctx, chain_name, deadline_at=deadline_at,
+            )
+    except _DeadlineReachedError:
+        raise
     except Exception:
         log.error('脚本执行异常', exc_info=True)
-        return False
+        return run_verdict.FAIL
 
 
 def _run_computer_op(
     script_config: ScriptConfig,
     privacy_screen: PrivacyScreen | None,
-) -> bool:
+) -> str:
     """执行电脑操作类型的脚本项（如打开/关闭隐私屏）。
 
     Args:
@@ -631,33 +664,33 @@ def _run_computer_op(
         privacy_screen: 本次链运行的隐私屏实例，为 None 时跳过。
 
     Returns:
-        操作是否成功。
+        运行结果分类（见 services.run_verdict）。
     """
     op_config = get_config_item_from_enum(ComputerOperation, script_config.computer_operation)
     if op_config is None:
         print_message(f'电脑操作未选择 跳过 {script_config.script_display_name}', 'ERROR')
-        return False
+        return run_verdict.CONFIG_ERROR
     if privacy_screen is None:
         print_message(f'隐私屏不可用 跳过电脑操作 {op_config.label}', 'ERROR')
-        return False
+        return run_verdict.ENV_ERROR
 
     print_message(f'执行电脑操作 {op_config.label}...')
     if script_config.computer_operation == ComputerOperation.OPEN_PRIVACY_SCREEN.value.value:
         if privacy_screen.start():
             print_message(f'电脑操作执行完成 {op_config.label}', level='PASS')
-            return True
+            return run_verdict.OK
         print_message(f'电脑操作执行失败 {op_config.label}', 'ERROR')
-        return False
+        return run_verdict.FAIL
 
     privacy_screen.stop()
     print_message(f'电脑操作执行完成 {op_config.label}', level='PASS')
-    return True
+    return run_verdict.OK
 
 
 def _run_python_script(
     script_config: ScriptConfig,
     log_notifier: LogNotifier | None = None,
-) -> bool:
+) -> str:
     """执行 Python 类型的脚本。
 
     读取 .py 文件并用 exec() 在当前进程中执行。
@@ -667,7 +700,7 @@ def _run_python_script(
         log_notifier: 可选的日志通知器，用于定时推送日志。
 
     Returns:
-        脚本是否执行成功。
+        运行结果分类（见 services.run_verdict）。
     """
     script_file = Path(script_config.script_path)
     display_name = script_config.script_display_name
@@ -675,18 +708,18 @@ def _run_python_script(
     invalid_msg = script_config.invalid_message
     if invalid_msg is not None:
         print_message(f'Python 脚本配置不合法 跳过运行 {invalid_msg}')
-        return False
+        return run_verdict.CONFIG_ERROR
 
     try:
         code = script_file.read_text(encoding='utf-8')
     except Exception as e:
         print_message(f'读取 Python 脚本失败 {display_name}: {e}', level='ERROR')
         log.error('读取 Python 脚本失败', exc_info=True)
-        return False
+        return run_verdict.CONFIG_ERROR
 
     if not code or not code.strip():
         print_message(f'Python 脚本为空 跳过 {display_name}')
-        return True
+        return run_verdict.OK
 
     print_message(f'执行 Python 脚本 {display_name}...')
     old_argv = sys.argv[:]
@@ -740,7 +773,7 @@ def _run_python_script(
         sys.path[:] = old_sys_path
         with suppress(Exception):
             os.chdir(old_cwd)
-    return success
+    return run_verdict.OK if success else run_verdict.FAIL
 
 
 def _cleanup_active_pm():
@@ -752,6 +785,84 @@ def _cleanup_active_pm():
         _active_pm = None
 
 
+def _state_file(name: str) -> Path:
+    """`config/state` 下的状态文件路径。"""
+    state_dir = Path(os_utils.get_path_under_work_dir('config', 'state'))
+    return state_dir / name
+
+
+def _guard_lock_screen(on_locked: str) -> int | None:
+    """启动脚本前自检锁屏。
+
+    锁屏时键鼠事件会被送到 Winlogon 安全桌面，脚本表现为「一直点不动」，
+    因此在产生任何脚本失败日志之前直接阻断。
+
+    Args:
+        on_locked: abort（默认跳过）、reboot（当天重启一次）、wait（等待解锁）。
+
+    Returns:
+        None 表示可以继续运行；否则为需要返回的退出码。
+    """
+    state = detect_lock()
+    if not state.locked:
+        print_message(f'锁屏自检通过：{state.evidence}')
+        return None
+
+    print_message(f'检测到屏幕已锁定，不启动脚本：{state.evidence}', level='ERROR')
+
+    if on_locked == 'wait':
+        while state.locked:
+            print_message('等待屏幕解锁（on_locked: wait）...')
+            if _exit_controller.wait(30):
+                return EXIT_LOCKED
+            state = detect_lock(observe_seconds=0)
+        print_message(f'屏幕已解锁，继续运行：{state.evidence}')
+        return None
+
+    if on_locked == 'reboot':
+        marker = _state_file(f'reboot-{datetime.date.today().isoformat()}.txt')
+        if marker.exists():
+            print_message('今日已因锁屏重启过一次，本次跳过以避免重启循环', level='ERROR')
+            return EXIT_LOCKED
+        try:
+            marker.parent.mkdir(parents=True, exist_ok=True)
+            marker.write_text(
+                f'{datetime.datetime.now():%Y-%m-%d %H:%M:%S} {state.evidence}\n',
+                encoding='utf-8',
+            )
+        except OSError:
+            log.error('写入重启标记失败', exc_info=True)
+        print_message(
+            '按 on_locked: reboot 计划在 60 秒后重启系统（请确保已配置自动登录）',
+            level='ERROR',
+        )
+        os.system('shutdown /r /t 60')
+        return EXIT_LOCKED
+
+    print_message('按 on_locked: abort 跳过本次运行', level='ERROR')
+    return EXIT_LOCKED
+
+
+def _print_run_summary(verdicts: list[tuple[str, str]]) -> None:
+    """输出脚本级运行结果汇总，便于从控制台直接看出失败分类。"""
+    if not verdicts:
+        return
+    counts: dict[str, int] = {}
+    failures: list[str] = []
+    for name, verdict in verdicts:
+        counts[verdict] = counts.get(verdict, 0) + 1
+        if not run_verdict.is_ok(verdict):
+            failures.append(f'{name}={run_verdict.label(verdict)}')
+
+    summary = '，'.join(
+        f'{run_verdict.label(verdict)} {count}'
+        for verdict, count in counts.items()
+    )
+    print_message(f'运行结果：{summary}', level='ERROR' if failures else 'PASS')
+    if failures:
+        print_message(f'未成功脚本：{", ".join(failures)}', level='ERROR')
+
+
 def _get_privacy_screen_close_key() -> str:
     """读取隐私屏开关热键的主键，读取失败时用默认值，避免影响脚本链。"""
     try:
@@ -761,7 +872,12 @@ def _get_privacy_screen_close_key() -> str:
         return DEFAULT_CLOSE_KEY
 
 
-def run_chain(chain_name: str = '01', shutdown_delay: int = 0, debug_index: int | None = None) -> int:
+def run_chain(
+    chain_name: str = '01',
+    shutdown_delay: int = 0,
+    debug_index: int | None = None,
+    deadline_at: float | None = None,
+) -> int:
     """运行指定的脚本链。
 
     Args:
@@ -769,9 +885,11 @@ def run_chain(chain_name: str = '01', shutdown_delay: int = 0, debug_index: int 
         shutdown_delay: 运行后关机延迟秒数，0 表示不关机。
         debug_index: 调试脚本下标，None 表示运行整个脚本链，非负整数表示仅调试该下标脚本，
             并按编排/挂靠关系一并纳入与其关联的脚本。
+        deadline_at: 全局截止时间戳（秒），由常驻调度传入；None 时按 deadline_minutes 自行计算。
 
     Returns:
-        0 表示全部脚本成功；1 表示存在失败脚本；2 表示配置错误。
+        0 表示全部脚本成功；1 表示存在失败脚本；2 表示配置错误；
+        3 表示到达全局截止时间；4 表示锁屏阻断。
     """
     _exit_controller.reset()
     configure_runner_runtime_logging()
@@ -781,6 +899,28 @@ def run_chain(chain_name: str = '01', shutdown_delay: int = 0, debug_index: int 
     atexit.register(_cleanup_active_pm)
 
     init(autoreset=True)
+
+    run_config: RunConfig | None
+    try:
+        run_config = RunConfig()
+    except Exception:
+        run_config = None
+        log.error('读取运行配置失败，锁屏与截止时间使用默认行为', exc_info=True)
+
+    # 锁屏自检必须在启动任何脚本之前完成，避免整轮脚本因键鼠失效而报废
+    lock_exit = _guard_lock_screen(run_config.on_locked if run_config is not None else 'abort')
+    if lock_exit is not None:
+        print_message('5秒后关闭本窗口')
+        _exit_controller.wait(5)
+        return lock_exit
+
+    if deadline_at is None and run_config is not None and run_config.deadline_minutes > 0:
+        deadline_at = time.time() + run_config.deadline_minutes * 60
+    if deadline_at is not None:
+        print_message(
+            f'全局截止时间：{datetime.datetime.fromtimestamp(deadline_at):%Y-%m-%d %H:%M:%S}'
+        )
+
     chain_config: ScriptChainConfig = ScriptChainConfig(chain_name)
 
     # 创建上下文实例
@@ -800,7 +940,7 @@ def run_chain(chain_name: str = '01', shutdown_delay: int = 0, debug_index: int 
             available = list_available_chains()
             if available:
                 print_message(f'可用脚本链: {", ".join(available)}', "INFO")
-            exit_code = 2
+            exit_code = EXIT_CONFIG_ERROR
         else:
             attach_targets = chain_config.compute_attach_targets()
             try:
@@ -811,7 +951,7 @@ def run_chain(chain_name: str = '01', shutdown_delay: int = 0, debug_index: int 
                 )
             except ValueError as e:
                 print_message(str(e), 'ERROR')
-                return 2
+                return EXIT_CONFIG_ERROR
 
             if selection.debug_target is not None:
                 print_message(f'调试运行脚本链 {chain_name}: {selection.debug_target.script_display_name}')
@@ -821,50 +961,79 @@ def run_chain(chain_name: str = '01', shutdown_delay: int = 0, debug_index: int 
             for message in skipped_messages:
                 print_message(message)
 
-            for group_idx, group in enumerate(runtime_groups):
-                log_notifier: LogNotifier | None = None
-                if ctx is not None and group.host.notify_log_interval > 0:
-                    log_notifier = LogNotifier(
-                        ctx=ctx,
-                        title=f'{ctx.notify_config.title} - {group.host.script_display_name} 日志',
-                        interval=group.host.notify_log_interval,
-                    )
-                    log_notifier.start()
+            deadline_hit = False
+            verdicts: list[tuple[str, str]] = []
 
-                try:
-                    if group.host.notify_start:
-                        _push_chain_notification(
-                            ctx,
-                            chain_name,
-                            '调试开始' if debug_index is not None else '开始运行',
-                            group.host,
-                        )
-
-                    for script_config in group.scripts:
-                        script_ok = _run_script_in_group(
-                            script_config, log_notifier, ctx, chain_name,
-                            privacy_screen=privacy_screen,
-                        )
-                        if not script_ok and exit_code == 0:
-                            exit_code = 1
-
-                    if group.host.notify_done:
-                        _push_chain_notification(
-                            ctx,
-                            chain_name,
-                            '调试结束' if debug_index is not None else '运行结束',
-                            group.host,
-                        )
-                finally:
-                    if log_notifier is not None:
-                        log_notifier.stop()
-
-                if group_idx < len(runtime_groups) - 1:
-                    print_message('10秒后开始下一个脚本')
-                    if _exit_controller.wait(10):
+            try:
+                for group_idx, group in enumerate(runtime_groups):
+                    if deadline_at is not None and time.time() >= deadline_at:
+                        deadline_hit = True
                         break
 
-            print_message('已完成调试脚本' if debug_index is not None else '已完成全部脚本')
+                    log_notifier: LogNotifier | None = None
+                    if ctx is not None and group.host.notify_log_interval > 0:
+                        log_notifier = LogNotifier(
+                            ctx=ctx,
+                            title=f'{ctx.notify_config.title} - {group.host.script_display_name} 日志',
+                            interval=group.host.notify_log_interval,
+                        )
+                        log_notifier.start()
+
+                    try:
+                        if group.host.notify_start:
+                            _push_chain_notification(
+                                ctx,
+                                chain_name,
+                                '调试开始' if debug_index is not None else '开始运行',
+                                group.host,
+                            )
+
+                        for script_config in group.scripts:
+                            if deadline_at is not None and time.time() >= deadline_at:
+                                deadline_hit = True
+                                break
+
+                            verdict = _run_script_in_group(
+                                script_config, log_notifier, ctx, chain_name,
+                                privacy_screen=privacy_screen,
+                                deadline_at=deadline_at,
+                            )
+                            verdicts.append((script_config.script_display_name, verdict))
+                            if (
+                                verdict == run_verdict.CONFIG_ERROR
+                                and exit_code in (EXIT_OK, EXIT_SCRIPT_FAILED)
+                            ):
+                                exit_code = EXIT_CONFIG_ERROR
+                            elif not run_verdict.is_ok(verdict) and exit_code == EXIT_OK:
+                                exit_code = EXIT_SCRIPT_FAILED
+
+                        if group.host.notify_done:
+                            _push_chain_notification(
+                                ctx,
+                                chain_name,
+                                '调试结束' if debug_index is not None else '运行结束',
+                                group.host,
+                            )
+                    finally:
+                        if log_notifier is not None:
+                            log_notifier.stop()
+
+                    if deadline_hit:
+                        break
+
+                    if group_idx < len(runtime_groups) - 1:
+                        print_message('10秒后开始下一个脚本')
+                        if _exit_controller.wait(10):
+                            break
+            except _DeadlineReachedError:
+                deadline_hit = True
+
+            if deadline_hit:
+                exit_code = EXIT_DEADLINE
+                print_message('到达全局截止时间，已停止执行后续脚本', level='ERROR')
+            else:
+                print_message('已完成调试脚本' if debug_index is not None else '已完成全部脚本')
+            _print_run_summary(verdicts)
             privacy_screen.stop()
 
         if shutdown_delay > 0:
@@ -891,6 +1060,7 @@ def run():
         chain_name=args.chain,
         shutdown_delay=args.shutdown if args.shutdown else 0,
         debug_index=args.debug_index,
+        deadline_at=args.deadline_at,
     )
     sys.exit(exit_code)
 

@@ -63,6 +63,12 @@ class ScriptChainerLauncher(ExeLauncher):
             default=None,
             help="开启/关闭随系统登录自动启动常驻调度，并写入 config/run.yml",
         )
+        parser.add_argument(
+            "--deadline-at",
+            type=float,
+            default=None,
+            help="全局截止时间戳（秒），由常驻调度传入",
+        )
 
     @staticmethod
     def _hide_console() -> None:
@@ -91,6 +97,7 @@ class ScriptChainerLauncher(ExeLauncher):
             chain_name=chain_name,
             shutdown_delay=shutdown_delay,
             debug_index=debug_index,
+            deadline_at=self.args.deadline_at if self.args else None,
         )
         sys.exit(exit_code)
 

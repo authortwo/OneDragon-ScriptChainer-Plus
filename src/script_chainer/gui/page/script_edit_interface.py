@@ -186,16 +186,11 @@ class ScriptEditInterface(VerticalScrollInterface):
         self.no_log_timeout_input.setSingleStep(1)
         self.no_log_timeout_input.setFixedWidth(140)
 
-        self.no_log_timeout_switch = SwitchButton()
-        self.no_log_timeout_switch.setOnText('')
-        self.no_log_timeout_switch.setOffText('')
-        self.no_log_timeout_switch.checkedChanged.connect(self._on_no_log_timeout_toggled)
-
         self.no_log_timeout_opt = MultiPushSettingCard(
             icon=FluentIcon.SYNC,
             title='无日志超时重启（秒）',
-            content='超过设定秒数无日志输出时，判定为未响应并重新执行',
-            btn_list=[self.no_log_timeout_input, self.no_log_timeout_switch],
+            content='超过设定秒数无日志输出时，判定为未响应并重新执行（保护不可关闭）',
+            btn_list=[self.no_log_timeout_input],
         )
         content_widget.add_widget(self.no_log_timeout_opt)
 
@@ -266,18 +261,12 @@ class ScriptEditInterface(VerticalScrollInterface):
         self.notify_log_interval_input.blockSignals(False)
         self.notify_log_interval_input.setEnabled(notify_log_enabled)
 
-        no_log_enabled = config.no_log_timeout_seconds > 0
-        self.no_log_timeout_switch.blockSignals(True)
-        self.no_log_timeout_switch.setChecked(no_log_enabled)
-        self.no_log_timeout_switch.blockSignals(False)
         self.no_log_timeout_input.blockSignals(True)
-        self.no_log_timeout_input.setValue(config.no_log_timeout_seconds if no_log_enabled else 300)
+        self.no_log_timeout_input.setValue(max(1, config.no_log_timeout_seconds))
         self.no_log_timeout_input.blockSignals(False)
-        self.no_log_timeout_input.setEnabled(no_log_enabled)
         self.no_log_max_retries_input.blockSignals(True)
         self.no_log_max_retries_input.setValue(max(1, config.no_log_max_retries))
         self.no_log_max_retries_input.blockSignals(False)
-        self.no_log_max_retries_input.setEnabled(no_log_enabled)
         self._sync_launch_method_ui()
         self._sync_launch_advanced_summary()
 
@@ -289,11 +278,6 @@ class ScriptEditInterface(VerticalScrollInterface):
     def _on_notify_log_toggled(self, checked: bool) -> None:
         """日志推送开关切换时启用/禁用间隔输入框"""
         self.notify_log_interval_input.setEnabled(checked)
-
-    def _on_no_log_timeout_toggled(self, checked: bool) -> None:
-        """静默超时重启开关切换时启用/禁用相关输入框"""
-        self.no_log_timeout_input.setEnabled(checked)
-        self.no_log_max_retries_input.setEnabled(checked)
 
     def on_script_path_clicked(self) -> None:
         file_path, _ = QFileDialog.getOpenFileName(self, gt('选择你的脚本'))
@@ -355,10 +339,7 @@ class ScriptEditInterface(VerticalScrollInterface):
         else:
             config.notify_log_interval = 0
 
-        if self.no_log_timeout_switch.isChecked():
-            config.no_log_timeout_seconds = max(1, self.no_log_timeout_input.value())
-        else:
-            config.no_log_timeout_seconds = 0
+        config.no_log_timeout_seconds = max(1, self.no_log_timeout_input.value())
         config.no_log_max_retries = self.no_log_max_retries_input.value()
 
         return config

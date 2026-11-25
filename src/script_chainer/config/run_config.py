@@ -22,6 +22,11 @@ SCHEDULE_DEFAULT_KEY = 'default'
 DEFAULT_RUN_WINDOW_START = '04:15'
 DEFAULT_RUN_WINDOW_END = '06:15'
 DEFAULT_POLL_SECONDS = 30
+DEFAULT_DEADLINE_MINUTES = 210
+"""单次计划的默认全局截止时间（分钟），0 表示不限。"""
+
+LOCK_POLICIES: tuple[str, ...] = ('abort', 'reboot', 'wait')
+"""检测到锁屏时的处理策略：abort 跳过、reboot 重启一次、wait 等待解锁。"""
 
 
 @dataclass(frozen=True)
@@ -101,6 +106,25 @@ class RunConfig(YamlConfig):
     def once_per_day(self) -> bool:
         """当日是否只跑一次（已完成则不再重跑，中断后允许补跑）。"""
         return self.get('once_per_day', True) is not False
+
+    @property
+    def deadline_minutes(self) -> int:
+        """单次计划的全局截止时间（分钟），0 表示不限。
+
+        到点后不再启动新的脚本链，正在运行的脚本会被终止收尾，
+        避免整条计划无限拖延。默认 210 分钟。
+        """
+        try:
+            value = int(self.get('deadline_minutes', DEFAULT_DEADLINE_MINUTES))
+        except (TypeError, ValueError):
+            return DEFAULT_DEADLINE_MINUTES
+        return max(0, value)
+
+    @property
+    def on_locked(self) -> str:
+        """检测到锁屏时的处理策略，非法值一律按 abort 处理。"""
+        value = str(self.get('on_locked', 'abort')).strip().lower()
+        return value if value in LOCK_POLICIES else 'abort'
 
     @property
     def autostart_enabled(self) -> bool:

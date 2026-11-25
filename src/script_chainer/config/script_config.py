@@ -11,6 +11,13 @@ from script_chainer.utils.process_name_utils import (
     process_name_equals,
 )
 
+DEFAULT_NO_LOG_TIMEOUT_SECONDS = 300
+"""无日志输出超时的默认判定时长（秒）。
+
+该保护不允许关闭：配置为 0 或负数时统一回落为本默认值，
+避免脚本静默卡死时一直等到 run_timeout_seconds 才结束。
+"""
+
 
 class CheckDoneMethods(Enum):
 
@@ -162,11 +169,29 @@ class ScriptConfig:
     notify_log_interval: int = 0
     enabled: bool = True
     attach_direction: str = AttachDirection.NONE
-    no_log_timeout_seconds: int = 0
+    no_log_timeout_seconds: int = DEFAULT_NO_LOG_TIMEOUT_SECONDS
     no_log_max_retries: int = 3
 
     # 不参与序列化的元数据
     idx: int = field(default=0, repr=False, compare=False)
+
+    def __post_init__(self) -> None:
+        """规整静默超时相关字段。
+
+        无日志超时是「脚本未响应」的唯一兜底，不允许通过 0/负数关闭，
+        否则脚本卡死时只能等到 run_timeout_seconds（默认 1 小时）。
+        """
+        try:
+            timeout = int(self.no_log_timeout_seconds)
+        except (TypeError, ValueError):
+            timeout = DEFAULT_NO_LOG_TIMEOUT_SECONDS
+        self.no_log_timeout_seconds = timeout if timeout > 0 else DEFAULT_NO_LOG_TIMEOUT_SECONDS
+
+        try:
+            retries = int(self.no_log_max_retries)
+        except (TypeError, ValueError):
+            retries = 0
+        self.no_log_max_retries = max(0, retries)
 
     def to_dict(self) -> dict:
         """序列化为字典（排除 idx）。"""

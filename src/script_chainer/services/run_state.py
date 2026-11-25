@@ -13,13 +13,27 @@ STATUS_NOT_STARTED = 'not_started'
 STATUS_RUNNING = 'running'
 STATUS_COMPLETED = 'completed'
 STATUS_INTERRUPTED = 'interrupted'
+STATUS_DEADLINE = 'deadline'
+STATUS_BLOCKED = 'blocked'
 
 STATUS_LABELS: dict[str, str] = {
     STATUS_NOT_STARTED: '未开始',
     STATUS_RUNNING: '运行中',
     STATUS_COMPLETED: '已完成',
     STATUS_INTERRUPTED: '已中断',
+    STATUS_DEADLINE: '已到截止',
+    STATUS_BLOCKED: '锁屏跳过',
 }
+
+_TERMINAL_STATUSES = frozenset({STATUS_COMPLETED, STATUS_DEADLINE, STATUS_BLOCKED})
+"""当日不再重跑的状态（once_per_day 生效时）。"""
+
+_STATUS_BY_EXIT_CODE: dict[int, str] = {
+    0: STATUS_COMPLETED,
+    3: STATUS_DEADLINE,
+    4: STATUS_BLOCKED,
+}
+"""退出码到当日状态的映射：0 成功、3 到达截止、4 锁屏阻断，其余视为中断可补跑。"""
 
 
 class DailyRunState:
@@ -68,8 +82,8 @@ class DailyRunState:
             return True, '今日尚未运行'
 
         status = self.status(date)
-        if status == STATUS_COMPLETED and once_per_day:
-            return False, '今日已完成'
+        if status in _TERMINAL_STATUSES and once_per_day:
+            return False, f'今日{STATUS_LABELS[status]}'
         if status == STATUS_RUNNING:
             pid = data.get('pid')
             if isinstance(pid, int) and _pid_alive(pid):
@@ -97,10 +111,10 @@ class DailyRunState:
         exit_code: int,
         started_at: str | None = None,
     ) -> None:
-        """记录运行结束：退出码 0 记为已完成，其余记为已中断。"""
+        """记录运行结束：0 已完成、3 已到截止、4 锁屏跳过，其余记为已中断（允许补跑）。"""
         self._write({
             'date': date.isoformat(),
-            'status': STATUS_COMPLETED if exit_code == 0 else STATUS_INTERRUPTED,
+            'status': _STATUS_BY_EXIT_CODE.get(exit_code, STATUS_INTERRUPTED),
             'pid': None,
             'chains': list(chains),
             'started_at': started_at,
