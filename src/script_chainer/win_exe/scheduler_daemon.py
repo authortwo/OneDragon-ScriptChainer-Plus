@@ -10,6 +10,7 @@ from one_dragon.utils import os_utils
 from script_chainer.config.run_config import RunConfig
 from script_chainer.services.autostart import sync_autostart
 from script_chainer.services.chain_schedule import (
+    describe_missing_chains,
     describe_schedule,
     resolve_chains_for_date,
     split_missing_chains,
@@ -147,10 +148,7 @@ def run_plan_once(
     missing = split_missing_chains(chains)
     plan_chains: list[dict] = []
     if missing:
-        log_line(
-            f'以下脚本链在 config/script_chain 下不存在，已跳过: {", ".join(missing)}',
-            level='ERROR',
-        )
+        log_line(describe_missing_chains(missing), level='ERROR')
         plan_chains.extend(
             {'chain': name, 'exit_code': EXIT_CONFIG_ERROR, 'note': '脚本链配置不存在'}
             for name in missing
@@ -295,6 +293,12 @@ def run_plan_cli(run_config: RunConfig | None = None) -> int:
     """
     run_config = run_config or RunConfig()
 
+    issues = run_config.validate()
+    if issues:
+        for issue in issues:
+            log_line(issue, level='ERROR')
+        return EXIT_CONFIG_ERROR
+
     try:
         window = run_config.run_window
     except ValueError as e:
@@ -363,6 +367,12 @@ def run_daemon(wait: bool = False, fail_fast: bool = False) -> int:
     if not run_config.scheduler_enabled:
         log_line('内置常驻调度未启用（scheduler_enabled: false），退出')
         return EXIT_OK
+
+    issues = run_config.validate()
+    if issues:
+        for issue in issues:
+            log_line(issue, level='ERROR')
+        return EXIT_CONFIG_ERROR
 
     sync_error = sync_autostart(run_config.autostart_enabled)
     if sync_error is not None:

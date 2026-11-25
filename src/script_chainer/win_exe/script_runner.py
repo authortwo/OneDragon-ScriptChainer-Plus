@@ -30,6 +30,7 @@ from script_chainer.context.script_chainer_context import ScriptChainerContext
 from script_chainer.services import run_verdict
 from script_chainer.services.chain_schedule import list_available_chains
 from script_chainer.services.single_instance import SingleInstanceLock
+from script_chainer.services.keep_awake import KeepAwake
 from script_chainer.services.log_notifier import LogNotifier
 from script_chainer.services.run_reporter import RunReporter
 from script_chainer.services.script_rules import LogRuleMonitor, parse_fail_fast, parse_stall
@@ -53,7 +54,7 @@ from script_chainer.utils.runtime_group_utils import (
     resolve_runtime_groups,
 )
 from script_chainer.utils.wait_utils import wait_with_cancel
-from script_chainer.services.win_desktop import detect_lock
+from script_chainer.services.win_desktop import current_user_sid, detect_lock
 from script_chainer.win_exe.runner_logging import (
     configure_runner_runtime_logging,
     log,
@@ -253,6 +254,40 @@ def _push_chain_report(ctx: ScriptChainerContext | None, report: dict) -> None:
         )
     except Exception:
         log.error('推送运行报告失败', exc_info=True)
+
+
+def _push_script_failed(
+    ctx: ScriptChainerContext | None,
+    chain_name: str,
+    script_config: ScriptConfig,
+    outcome: run_verdict.ScriptOutcome,
+    will_retry: bool,
+) -> None:
+    """脚本判失败时立即推送一条（F-17），不必等整轮结束。
+
+    Args:
+        will_retry: 是否还会进入重跑，用于提示「等待重跑」而不是「已失败」。
+    """
+    if ctx is None:
+        return
+
+    lines = [
+        f'脚本链 {chain_name} 的脚本 {script_config.script_display_name} '
+        f'{run_verdict.label(outcome.verdict)}',
+    ]
+    if outcome.end_reason:
+        lines.append(f'结束原因: {outcome.end_reason}')
+    if outcome.error_summary:
+        lines.append(f'错误摘要: {outcome.error_summary}')
+    lines.append('将按配置重跑' if will_retry else '不再重跑')
+
+    try:
+        ctx.push_service.push_async(
+            title=f'{ctx.notify_config.title} - 脚本失败',
+            content='\n'.join(lines),
+        )
+    except Exception:
+        log.error('推送脚本失败通知失败', exc_info=True)
 
 
 def _make_stdout_callback(
@@ -1047,6 +1082,36 @@ def _guard_lock_screen(on_locked: str) -> int | None:
     return EXIT_LOCKED
 
 
+def _guard_run_as_sid(run_config: RunConfig | None) -> int | None:
+    """校验当前运行账户是否符合 `run_as_sid` 配置（F-14）。
+
+    Returns:
+        None 表示可以继续运行；否则为需要返回的退出码（配置错误 2）。
+    """
+    if run_config is None:
+        return None
+
+    expected = run_config.run_as_sid
+    if not expected:
+        return None
+
+    current = current_user_sid()
+    if current is None:
+        print_message('无法读取当前账户 SID，跳过 run_as_sid 校验', level='WARN')
+        return None
+    if current.lower() == expected.lower():
+        print_message(f'运行账户校验通过：{current}')
+        return None
+
+    message = f'运行账户不匹配：期望 {expected}，实际 {current}'
+    if run_config.run_as_sid_action == 'warn':
+        print_message(f'{message}（run_as_sid_action: warn，继续运行）', level='WARN')
+        return None
+
+    print_message(f'{message}（run_as_sid_action: abort，中止运行）', level='ERROR')
+    return EXIT_CONFIG_ERROR
+
+
 def _retry_candidates(
     reporter: RunReporter,
     script_by_idx: dict[int, ScriptConfig],
@@ -1080,6 +1145,24 @@ def _retry_candidates(
         if script_config is not None:
             result.append(script_config)
     return result
+
+
+def _will_retry(
+    run_config: RunConfig | None,
+    outcome: run_verdict.ScriptOutcome,
+) -> bool:
+    """判断该结果是否会进入脚本级重跑，用于失败通知文案。"""
+    if run_config is None or run_config.retry_max_rounds <= 0:
+        return False
+    if outcome.verdict == run_verdict.FAIL:
+        return True
+    if outcome.verdict == run_verdict.CONFIG_ERROR:
+        return not run_config.retry_skip_on_config_error
+    if outcome.verdict == run_verdict.ENV_ERROR:
+        return not run_config.retry_skip_on_crash
+    return False
+
+
 def _retry_failed_scripts(
     reporter: RunReporter,
     script_by_idx: dict[int, ScriptConfig],
@@ -1147,6 +1230,11 @@ def _retry_failed_scripts(
                 break
             outcome.retry_round = round_no
             reporter.script_retried(script_config.idx, outcome)
+            if not run_verdict.is_ok(outcome.verdict):
+                _push_script_failed(
+                    ctx, chain_name, script_config, outcome,
+                    will_retry=_will_retry(run_config, outcome) and round_no < max_rounds,
+                )
 
         if deadline_reached:
             break
@@ -1255,6 +1343,19 @@ def _run_chain_locked(
         _exit_controller.wait(5)
         return lock_exit
 
+    account_exit = _guard_run_as_sid(run_config)
+    if account_exit is not None:
+        print_message('5秒后关闭本窗口')
+        _exit_controller.wait(5)
+        return account_exit
+
+    keep_awake = KeepAwake()
+    if run_config is not None and run_config.keep_awake:
+        if keep_awake.start():
+            print_message('已开启运行期保持唤醒（不自动睡眠、不熄屏）')
+        else:
+            print_message('保持唤醒设置失败，继续运行', level='WARN')
+
     if deadline_at is None and run_config is not None and run_config.deadline_minutes > 0:
         deadline_at = time.time() + run_config.deadline_minutes * 60
     if deadline_at is not None:
@@ -1281,12 +1382,19 @@ def _run_chain_locked(
             print_message(f'脚本链配置不存在 {chain_name}', "ERROR")
             available = list_available_chains()
             if available:
-                print_message(f'可用脚本链: {", ".join(available)}', "INFO")
+                print_message(f'脚本链 {chain_name} 未找到，可用：{", ".join(available)}', "ERROR")
+                print_message('如刚重命名过，请同步修改 --chain 与 config/run.yml 中 schedule 的引用', "INFO")
+            else:
+                print_message(
+                    f'config/script_chain 下没有任何脚本链配置，请先新建 {chain_name}.yml', "ERROR",
+                )
             exit_code = EXIT_CONFIG_ERROR
             reporter.chain_started()
             report = reporter.chain_finished(exit_code)
             _push_chain_report(ctx, report)
         else:
+            for warning in chain_config.config_warnings():
+                print_message(warning, 'WARN')
             attach_targets = chain_config.compute_attach_targets()
             try:
                 selection = build_runtime_selection(
@@ -1364,6 +1472,12 @@ def _run_chain_locked(
                                 deadline_hit = True
                                 break
                             reporter.script_finished(script_config.idx, outcome)
+                            if not run_verdict.is_ok(outcome.verdict):
+                                # 失败即时通知：不必等整轮结束
+                                _push_script_failed(
+                                    ctx, chain_name, script_config, outcome,
+                                    will_retry=_will_retry(run_config, outcome),
+                                )
                             if (
                                 outcome.verdict == run_verdict.CONFIG_ERROR
                                 and exit_code in (EXIT_OK, EXIT_SCRIPT_FAILED)
@@ -1444,6 +1558,7 @@ def _run_chain_locked(
         return exit_code
     finally:
         privacy_screen.stop()
+        keep_awake.stop()
         # 清理资源
         if ctx is not None:
             try:

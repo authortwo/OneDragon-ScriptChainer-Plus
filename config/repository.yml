@@ -1,5 +1,5 @@
 repositories:
-  primary: github
+  primary: cnb
   primary_branch: main
   branches:
     main:
@@ -15,11 +15,14 @@ repositories:
       url: "https://cnb.cool/OneDragon-Anything/OneDragon-ScriptChainer.git"
       use_proxy: false
 resource_download:
-  default: github
+  default: cnb
   options:
     github:
       label: GitHub
       value: "https://example.com/resource"
+    cnb:
+      label: CNB
+      value: "https://example.com/resource-cnb"
   sources:
     github:
       label: GitHub

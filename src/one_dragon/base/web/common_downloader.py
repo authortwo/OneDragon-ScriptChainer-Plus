@@ -1,4 +1,5 @@
 import os
+import time
 from collections.abc import Callable
 from dataclasses import dataclass
 
@@ -119,6 +120,7 @@ class CommonDownloader:
                     download_url = f'{proxy_prefix}/{download_url}'
 
             log.info(f'尝试从 {source_id} 下载 {self.param.save_file_name}')
+            source_started_at = time.monotonic()
             if status_callback is not None:
                 status_callback(
                     ResourceDownloadProgress(
@@ -156,6 +158,9 @@ class CommonDownloader:
             )
 
             if success:
+                log.info(
+                    f'从 {source_id} 下载成功 用时 {time.monotonic() - source_started_at:.1f}s'
+                )
                 if on_source_success is not None:
                     on_source_success(source_id)
                 return True
@@ -166,7 +171,9 @@ class CommonDownloader:
 
             if on_source_failure is not None:
                 on_source_failure(source_id)
-            log.warning(f'从 {source_id} 下载失败 尝试下一个源')
+            log.warning(
+                f'从 {source_id} 下载失败 用时 {time.monotonic() - source_started_at:.1f}s 尝试下一个源'
+            )
 
         return False
 

@@ -169,3 +169,67 @@ def detect_lock(observe_seconds: float = DEFAULT_OBSERVE_SECONDS) -> LockState:
         time.sleep(min(_SAMPLE_INTERVAL_SECONDS, max(0.1, deadline - time.time())))
         state, definite = _sample()
     return state
+
+
+def current_user_sid() -> str | None:
+    """取当前进程所属账户的 SID 字符串；失败或非 Windows 返回 None。"""
+    if sys.platform != 'win32':
+        return None
+    try:
+        advapi32 = ctypes.WinDLL('advapi32', use_last_error=True)
+        kernel32 = _kernel32()
+        kernel32.GetCurrentProcess.restype = ctypes.c_void_p
+        advapi32.OpenProcessToken.argtypes = [
+            ctypes.c_void_p,
+            ctypes.c_ulong,
+            ctypes.POINTER(ctypes.c_void_p),
+        ]
+        advapi32.OpenProcessToken.restype = ctypes.c_int
+        advapi32.GetTokenInformation.argtypes = [
+            ctypes.c_void_p,
+            ctypes.c_int,
+            ctypes.c_void_p,
+            ctypes.c_ulong,
+            ctypes.POINTER(ctypes.c_ulong),
+        ]
+        advapi32.GetTokenInformation.restype = ctypes.c_int
+        advapi32.ConvertSidToStringSidW.argtypes = [
+            ctypes.c_void_p,
+            ctypes.POINTER(ctypes.c_wchar_p),
+        ]
+        advapi32.ConvertSidToStringSidW.restype = ctypes.c_int
+        kernel32.CloseHandle.argtypes = [ctypes.c_void_p]
+        kernel32.LocalFree.argtypes = [ctypes.c_void_p]
+
+        token = ctypes.c_void_p()
+        token_query = 0x0008
+        if not advapi32.OpenProcessToken(
+            kernel32.GetCurrentProcess(), token_query, ctypes.byref(token),
+        ):
+            return None
+        try:
+            token_user = 1
+            size = ctypes.c_ulong(0)
+            advapi32.GetTokenInformation(
+                token, token_user, None, 0, ctypes.byref(size),
+            )
+            if size.value <= 0:
+                return None
+            buffer = ctypes.create_string_buffer(size.value)
+            if not advapi32.GetTokenInformation(
+                token, token_user, buffer, size.value, ctypes.byref(size),
+            ):
+                return None
+            # TOKEN_USER 首个字段是 SID_AND_ATTRIBUTES，其首个字段即 PSID
+            sid_pointer = ctypes.cast(buffer, ctypes.POINTER(ctypes.c_void_p))[0]
+            sid_text = ctypes.c_wchar_p()
+            if not advapi32.ConvertSidToStringSidW(sid_pointer, ctypes.byref(sid_text)):
+                return None
+            try:
+                return sid_text.value or None
+            finally:
+                kernel32.LocalFree(sid_text)
+        finally:
+            kernel32.CloseHandle(token)
+    except (AttributeError, OSError):
+        return None

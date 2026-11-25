@@ -173,18 +173,58 @@ class RepoConfig(YamlConfig):
     def _get_repository_config(self) -> dict:
         raw_repositories = self.get('repositories', {})
         if not isinstance(raw_repositories, dict):
-            raise ValueError('config/repository.yml 必须配置 repositories')
+            raise ValueError(
+                'config/repository.yml 缺少 repositories 配置组。'
+                '请补上：\n'
+                'repositories:\n'
+                '  primary: cnb          # 主仓库，取值来自 options 中的键\n'
+                '  primary_branch: main\n'
+                '  branches: {main: {label: 主分支, desc: ""}}\n'
+                '  options:\n'
+                '    cnb: {label: CNB, url: "https://cnb.cool/...", use_proxy: false}'
+            )
         if not raw_repositories:
-            raise ValueError('repositories 必须配置 primary')
+            raise ValueError(self._missing_key_hint('primary', raw_repositories))
         if 'primary' not in raw_repositories:
-            raise ValueError('repositories 必须配置 primary')
+            raise ValueError(self._missing_key_hint('primary', raw_repositories))
         if 'primary_branch' not in raw_repositories:
-            raise ValueError('repositories 必须配置 primary_branch')
+            raise ValueError(self._missing_key_hint('primary_branch', raw_repositories))
         if 'branches' not in raw_repositories:
-            raise ValueError('repositories 必须配置 branches')
+            raise ValueError(self._missing_key_hint('branches', raw_repositories))
         if 'options' not in raw_repositories:
-            raise ValueError('repositories 必须配置 options')
+            raise ValueError(self._missing_key_hint('options', raw_repositories))
         return raw_repositories
+
+    @staticmethod
+    def _missing_key_hint(key: str, repository_config: dict) -> str:
+        """为缺失的 repositories 必填项生成带示例的修复建议。"""
+        options = repository_config.get('options')
+        option_keys = list(options) if isinstance(options, dict) else []
+        examples = {
+            'primary': (
+                'primary: cnb',
+                '主仓库，取值为 repositories.options 中的键'
+                + (f'（当前可用：{", ".join(option_keys)}）' if option_keys else ''),
+            ),
+            'primary_branch': (
+                'primary_branch: main',
+                '主分支，取值为 repositories.branches 中的键',
+            ),
+            'branches': (
+                'branches:\n    main: {label: 主分支, desc: ""}',
+                '可选代码分支',
+            ),
+            'options': (
+                'options:\n    cnb: {label: CNB, url: "https://cnb.cool/...", use_proxy: false}',
+                '可选代码源',
+            ),
+        }
+        example, desc = examples.get(key, (f'{key}: <值>', ''))
+        suffix = f'（{desc}）' if desc else ''
+        return (
+            f'config/repository.yml 的 repositories 缺少必填项 {key}{suffix}。'
+            f'请在 config/repository.yml 的 repositories 下增加：\n  {example}'
+        )
 
     def _load_branches(self, repository_config: dict) -> tuple[RepositoryBranch, ...]:
         raw_branches = repository_config.get('branches', {})

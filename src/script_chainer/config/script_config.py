@@ -346,6 +346,27 @@ class ScriptConfig:
             return '运行超时时间必须大于0'
 
 
+def _collect_script_warnings(raw_script_list: list[dict]) -> list[str]:
+    """扫描脚本级配置里「能跑但很可能不是本意」的写法，给出修复建议（F-19）。"""
+    warnings: list[str] = []
+    for index, raw in enumerate(raw_script_list):
+        if not isinstance(raw, dict):
+            continue
+        name = str(raw.get('display_name') or f'第 {index + 1} 个脚本')
+        if 'no_log_timeout_seconds' in raw:
+            try:
+                timeout = int(raw.get('no_log_timeout_seconds'))
+            except (TypeError, ValueError):
+                timeout = 0
+            if timeout <= 0:
+                warnings.append(
+                    f'脚本「{name}」的 no_log_timeout_seconds 为 {raw.get("no_log_timeout_seconds")!r}，'
+                    f'已按默认值 {DEFAULT_NO_LOG_TIMEOUT_SECONDS} 秒处理。'
+                    '该保护不允许关闭，如需放宽请填写更大的秒数'
+                )
+    return warnings
+
+
 class ScriptChainConfig(YamlConfig):
 
     _script_config_fields = {f.name for f in fields(ScriptConfig)} - {'idx'}
@@ -375,8 +396,13 @@ class ScriptChainConfig(YamlConfig):
         for config in self.script_list:
             config.script_path = self._to_runtime_script_path(config.script_path)
         self.init_idx()
+        self._config_warnings = _collect_script_warnings(migrated_script_list)
         if migrated or migrated_script_list != [i.to_dict() for i in self.script_list]:
             self.save()
+
+    def config_warnings(self) -> list[str]:
+        """返回配置层面的提示（不阻断运行），启动时打印修复建议（F-19）。"""
+        return list(self._config_warnings)
 
     def _get_script_chain_dir(self) -> Path:
         return Path(self.file_path).parent

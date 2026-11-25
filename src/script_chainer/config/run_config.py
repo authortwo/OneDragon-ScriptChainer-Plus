@@ -96,6 +96,23 @@ class RunConfig(YamlConfig):
         self.update('privacy_screen_close_key', new_value)
 
     @property
+    def keep_awake(self) -> bool:
+        """运行期间是否阻止系统睡眠与熄屏，默认开启。"""
+        return self.get('keep_awake', True) is not False
+
+    @property
+    def run_as_sid(self) -> str:
+        """期望的运行账户 SID，空字符串表示不校验。"""
+        value = self.get('run_as_sid', '')
+        return value.strip() if isinstance(value, str) else ''
+
+    @property
+    def run_as_sid_action(self) -> str:
+        """账户不匹配时的处理：abort 中止（退出码 2）或 warn 仅告警。"""
+        value = str(self.get('run_as_sid_action', 'abort')).strip().lower()
+        return value if value in ('abort', 'warn') else 'abort'
+
+    @property
     def scheduler_enabled(self) -> bool:
         """是否启用内置常驻调度。"""
         return self.get('scheduler_enabled', True) is not False
@@ -270,6 +287,97 @@ class RunConfig(YamlConfig):
         if chains is None:
             chains = schedule.get(SCHEDULE_DEFAULT_KEY, [])
         return list(chains)
+
+    def validate(self) -> list[str]:
+        """校验 run.yml 的字段与类型，返回可操作的错误说明列表（F-19）。
+
+        只报告需要用户修改配置的问题；缺省值合法的字段不报错。
+        """
+        issues: list[str] = []
+        data = self.data if isinstance(self.data, dict) else {}
+
+        try:
+            self.run_window
+        except ValueError as e:
+            issues.append(
+                f'config/run.yml 的 {e}。示例：\n'
+                'run_window:\n  start: "04:15"\n  end: "06:15"\n'
+                '（不需要限制时间时，删掉整个 run_window 配置）'
+            )
+
+        try:
+            self.schedule
+        except ValueError as e:
+            issues.append(f'config/run.yml 的 {e}')
+
+        issues.extend(_check_bool(data, ('once_per_day', 'keep_awake', 'scheduler_enabled', 'autostart_enabled')))
+        issues.extend(_check_int(data, ('deadline_minutes', 'scheduler_poll_seconds', 'shutdown_after_run')))
+        issues.extend(_check_choice(data, 'on_locked', LOCK_POLICIES))
+        issues.extend(_check_choice(data, 'run_as_sid_action', ('abort', 'warn')))
+
+        retry = data.get('retry')
+        if retry is not None:
+            if not isinstance(retry, dict):
+                issues.append(
+                    'config/run.yml 的 retry 应为对象，示例：\n'
+                    'retry:\n  max_rounds: 2\n  delay_seconds: 60'
+                )
+            else:
+                issues.extend(_check_int(retry, ('max_rounds', 'delay_seconds'), 'retry.'))
+                issues.extend(_check_bool(
+                    retry, ('only_failed', 'skip_on_config_error', 'skip_on_crash'), 'retry.',
+                ))
+
+        return issues
+
+
+def _check_bool(data: dict, keys: tuple[str, ...], prefix: str = '') -> list[str]:
+    """检查字段是否为布尔值，返回错误说明。"""
+    issues: list[str] = []
+    for key in keys:
+        if key in data and not isinstance(data[key], bool):
+            issues.append(
+                f'config/run.yml 的 {prefix}{key} 应为 true 或 false，当前为 {data[key]!r}'
+            )
+    return issues
+
+
+def _check_int(data: dict, keys: tuple[str, ...], prefix: str = '') -> list[str]:
+    """检查字段是否为非负整数（允许数字字符串），返回错误说明。"""
+    issues: list[str] = []
+    for key in keys:
+        if key not in data:
+            continue
+        value = data[key]
+        if isinstance(value, bool) or not isinstance(value, (int, str)):
+            issues.append(
+                f'config/run.yml 的 {prefix}{key} 应为整数，当前为 {value!r}'
+            )
+            continue
+        try:
+            number = int(value)
+        except (TypeError, ValueError):
+            issues.append(
+                f'config/run.yml 的 {prefix}{key} 应为整数，当前为 {value!r}'
+            )
+            continue
+        if number < 0:
+            issues.append(
+                f'config/run.yml 的 {prefix}{key} 不能为负数，当前为 {value!r}'
+            )
+    return issues
+
+
+def _check_choice(data: dict, key: str, choices: tuple[str, ...]) -> list[str]:
+    """检查字段取值是否在允许范围内，返回错误说明。"""
+    if key not in data:
+        return []
+    value = str(data[key]).strip().lower()
+    if value in choices:
+        return []
+    return [
+        f'config/run.yml 的 {key} 只能是 {"/".join(choices)}，当前为 {data[key]!r}'
+    ]
 
 
 def _normalize_chain_list(value: object) -> list[str]:

@@ -3,9 +3,11 @@ import os
 import shutil
 import subprocess
 import sys
+import time
 import urllib.parse
 import urllib.request
 import zipfile
+from collections.abc import Callable
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING
 
@@ -29,6 +31,9 @@ RELEASE_ZIP_PREFIX = 'OneDragon-ScriptChainer'
 UPDATE_DIR_NAME = 'github_update'
 RUNTIME_DIR_NAME = '.runtime'
 GITHUB_USER_AGENT = 'OneDragon-ScriptChainer'
+GITHUB_API_URL = 'https://api.github.com'
+CNB_WEB_URL = 'https://cnb.cool'
+CNB_SOURCE_ID = 'cnb'
 
 
 class GithubUpdateService:
@@ -82,6 +87,7 @@ class GithubUpdateService:
             target_version=target_tag,
             downloader_factory=lambda: CommonDownloader(downloader_param),
             note=gt('下载完成后程序将重启并替换文件'),
+            source_order=self.ctx.env_config.get_resource_source_order(),
             before_download=before_download,
             after_download=after_download,
         )
@@ -93,7 +99,7 @@ class GithubUpdateService:
             stable_tag = self.get_latest_tag()
         except Exception as e:
             stable_error = e
-            log.error('获取 GitHub 最新正式版失败', exc_info=True)
+            log.error('获取最新正式版失败', exc_info=True)
 
         beta_tag = ''
         beta_error: Exception | None = None
@@ -101,29 +107,125 @@ class GithubUpdateService:
             beta_tag = self.get_latest_beta_tag()
         except Exception as e:
             beta_error = e
-            log.error('获取 GitHub 最新测试版失败', exc_info=True)
+            log.error('获取最新测试版失败', exc_info=True)
 
         if not stable_tag and not beta_tag:
             raise RuntimeError(
-                f'获取 GitHub 最新版本失败: stable={stable_error}; beta={beta_error}'
+                f'获取最新版本失败: stable={stable_error}; beta={beta_error}'
             )
         return stable_tag, beta_tag
 
     def get_latest_tag(self) -> str:
-        repo_path = self._get_github_repo_path()
-        release_url = f'https://api.github.com/repos/{repo_path}/releases/latest'
-        release = self._get_github_json(release_url)
+        return self._fetch_tag_with_fallback(self._fetch_latest_stable_tag, '正式版')
 
+    def get_latest_beta_tag(self) -> str:
+        return self._fetch_tag_with_fallback(self._fetch_latest_beta_tag, '测试版')
+
+    def _fetch_tag_with_fallback(
+        self,
+        fetcher: Callable[[str, str], str],
+        label: str,
+    ) -> str:
+        """按主仓库优先的顺序获取版本标签，失败自动回退并记录每个源的耗时。
+
+        Args:
+            fetcher: 接收 (源ID, 仓库路径) 并返回标签的函数。
+            label: 日志中的版本类型说明。
+
+        Returns:
+            首个成功源返回的标签；所有源都正常但无该版本时返回空字符串。
+
+        Raises:
+            RuntimeError: 所有源都失败时抛出，内容包含每个源的耗时与错误。
+        """
+        candidates = self._get_release_candidates()
+        if not candidates:
+            raise RuntimeError('config/repository.yml 没有可用的代码源')
+
+        errors: list[str] = []
+        for source_id, repo_path in candidates:
+            started_at = time.monotonic()
+            try:
+                tag = fetcher(source_id, repo_path)
+            except Exception as e:
+                elapsed = time.monotonic() - started_at
+                errors.append(f'{source_id} 失败({elapsed:.1f}s): {e}')
+                log.warning(f'从 {source_id} 获取最新{label}失败 用时 {elapsed:.1f}s 尝试下一个源')
+                continue
+
+            elapsed = time.monotonic() - started_at
+            if not tag:
+                errors.append(f'{source_id} 无{label}({elapsed:.1f}s)')
+                log.info(f'从 {source_id} 未找到最新{label} 用时 {elapsed:.1f}s')
+                continue
+
+            log.info(f'从 {source_id} 获取最新{label}成功: {tag} 用时 {elapsed:.1f}s')
+            return tag
+
+        raise RuntimeError(f'获取最新{label}失败: ' + '; '.join(errors))
+
+    def _get_release_candidates(self) -> list[tuple[str, str]]:
+        """按主仓库优先的顺序返回 (源ID, 仓库路径) 候选。"""
+        repo_config = self.ctx.repo_config
+        ordered = [repo_config.primary_repository, *repo_config.repositories]
+        candidates: list[tuple[str, str]] = []
+        seen: set[str] = set()
+        for repository in ordered:
+            if repository.repository_id in seen:
+                continue
+            seen.add(repository.repository_id)
+            repo_path = self._parse_repo_path(repository.url)
+            if repo_path:
+                candidates.append((repository.repository_id, repo_path))
+        return candidates
+
+    @staticmethod
+    def _parse_repo_path(repository_url: str) -> str:
+        """从代码源地址解析 owner/repo 形式的仓库路径。"""
+        parsed = urllib.parse.urlparse(repository_url or '')
+        repo_path = parsed.path.strip('/')
+        if repo_path.endswith('.git'):
+            repo_path = repo_path[:-4]
+        return repo_path if repo_path.count('/') >= 1 else ''
+
+    def _fetch_latest_stable_tag(self, source_id: str, repo_path: str) -> str:
+        """从指定源获取最新正式版标签。"""
+        if source_id == CNB_SOURCE_ID:
+            releases = self._get_cnb_releases(repo_path)
+            for release in releases:
+                if release.get('is_draft') or release.get('is_prerelease'):
+                    continue
+                if release.get('is_latest'):
+                    return self._cnb_tag(release)
+            for release in releases:
+                if release.get('is_draft') or release.get('is_prerelease'):
+                    continue
+                tag = self._cnb_tag(release)
+                if tag:
+                    return tag
+            return ''
+
+        release_url = f'{GITHUB_API_URL}/repos/{repo_path}/releases/latest'
+        release = self._get_github_json(release_url)
         tag = str(release.get('tag_name', '')).strip()
         if not tag:
             raise RuntimeError(f'无法解析最新版本: {release_url}')
         return tag
 
-    def get_latest_beta_tag(self) -> str:
-        repo_path = self._get_github_repo_path()
-        releases_url = f'https://api.github.com/repos/{repo_path}/releases?per_page=30'
-        releases = self._get_github_json(releases_url)
+    def _fetch_latest_beta_tag(self, source_id: str, repo_path: str) -> str:
+        """从指定源获取最新测试版标签。"""
+        if source_id == CNB_SOURCE_ID:
+            for release in self._get_cnb_releases(repo_path):
+                if release.get('is_draft'):
+                    continue
+                if release.get('is_prerelease'):
+                    tag = self._cnb_tag(release)
+                    if tag:
+                        return tag
+            return ''
 
+        releases_url = f'{GITHUB_API_URL}/repos/{repo_path}/releases?per_page=30'
+        releases = self._get_github_json(releases_url)
         for release in releases:
             if release.get('draft'):
                 continue
@@ -134,15 +236,61 @@ class GithubUpdateService:
 
         return ''
 
-    def _get_github_repo_path(self) -> str:
-        homepage = self.ctx.project_config.github_homepage
-        parsed = urllib.parse.urlparse(homepage)
-        repo_path = parsed.path.strip('/')
-        if repo_path.endswith('.git'):
-            repo_path = repo_path[:-4]
-        if repo_path.count('/') < 1:
-            raise RuntimeError(f'无法解析 GitHub 仓库地址: {homepage}')
-        return repo_path
+    def _get_cnb_releases(self, repo_path: str) -> list[dict]:
+        """解析 CNB release 页面内嵌的 release 列表。"""
+        url = f'{CNB_WEB_URL}/{repo_path}/-/releases'
+        with self._open_request(
+            url,
+            headers={'User-Agent': GITHUB_USER_AGENT},
+        ) as response:
+            html = response.read().decode('utf-8', errors='replace')
+
+        marker = '"releases":['
+        index = html.find(marker)
+        if index == -1:
+            raise RuntimeError(f'无法从 CNB 页面解析 release 列表: {url}')
+
+        start = index + len(marker) - 1
+        end = self._match_bracket(html, start)
+        data = json.loads(html[start:end + 1])
+        if not isinstance(data, list):
+            raise RuntimeError(f'CNB 页面 release 列表格式异常: {url}')
+        return [item for item in data if isinstance(item, dict)]
+
+    @staticmethod
+    def _cnb_tag(release: dict) -> str:
+        """从 CNB release 对象中取出标签名。"""
+        tag_ref = release.get('tag_ref')
+        if isinstance(tag_ref, str) and tag_ref:
+            return tag_ref.rsplit('/', 1)[-1].strip()
+        tag_name = release.get('tag_name')
+        return tag_name.strip() if isinstance(tag_name, str) else ''
+
+    @staticmethod
+    def _match_bracket(text: str, start: int) -> int:
+        """返回与 text[start] 处括号配对的结束下标，忽略字符串内的括号。"""
+        depth = 0
+        in_string = False
+        escaped = False
+        for index in range(start, len(text)):
+            char = text[index]
+            if in_string:
+                if escaped:
+                    escaped = False
+                elif char == '\\':
+                    escaped = True
+                elif char == '"':
+                    in_string = False
+                continue
+            if char == '"':
+                in_string = True
+            elif char in '[{':
+                depth += 1
+            elif char in ']}':
+                depth -= 1
+                if depth == 0:
+                    return index
+        raise RuntimeError('CNB 页面 release 列表不完整')
 
     def _get_github_json(self, url: str):
         with self._open_request(

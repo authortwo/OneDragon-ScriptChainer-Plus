@@ -66,6 +66,9 @@ retry:                       # 失败脚本的脚本级重跑
 run_window:
   start: "04:15"             # 允许运行的时间窗，两端都留空表示不限时间
   end: "06:15"
+keep_awake: true             # 运行期阻止系统睡眠和熄屏，结束自动恢复
+run_as_sid: ""               # 期望运行账户的 SID（如 S-1-5-21-...），留空不校验
+run_as_sid_action: abort     # 账户不匹配时：abort 立即退出（退出码 2）/ warn 仅告警
 schedule:                    # 星期 -> 脚本链列表
   monday: [genshin-linr, honkai3-weekly]
   default: [genshin-linr, genshin-my, zzz-daily]
@@ -97,6 +100,30 @@ F-21 之后，安装与运维相关的选项都收敛到「设置 → 运行」�
 启动脚本前会自检锁屏：通过 `OpenInputDesktop` 取当前输入桌面，桌面名为 `Winlogon` 即判定为锁定，此时不会启动任何脚本，避免整晚键鼠失效。`on_locked: reboot` 会在当天首次锁屏时重启系统（写入 `config/state/reboot-<日期>.txt` 防止重启循环），请提前配置自动登录；`on_locked: wait` 会等待解锁后继续。
 
 脚本的无日志超时保护默认 300 秒且不可关闭：超过设定秒数没有任何日志输出时判定为未响应，按 `no_log_max_retries` 重试。
+
+运行期保持唤醒：`keep_awake: true` 时通过 `SetThreadExecutionState` 声明「系统必需 + 显示必需」，脚本链结束后自动恢复，避免整晚运行被系统睡眠打断。
+
+账户校验：`run_as_sid` 填目标账户的 SID 后，Runner 启动时会比对当前进程账户，不一致时按 `run_as_sid_action` 处理（`abort` 立即告警并以退出码 2 结束，`warn` 只打警告继续运行）。
+
+启动时会校验 `config/run.yml` 的字段类型与取值：时间窗只填一端、`deadline_minutes` 不是数字、`on_locked` 不在可选值内等问题会逐条给出「缺什么、填什么、示例」，配置错误时直接以退出码 2 退出，不再带病运行。
+
+### 失败推送
+
+脚本判定失败时立即推送一条通知，内容包括失败脚本、结束原因、错误摘要，以及「将按配置重跑 / 不再重跑」；整轮结束后再推送一次汇总，避免只在最后才知道中途失败。
+
+### 国内下载源
+
+`config/repository.yml` 默认把主仓库与资源源都设为 CNB（`repositories.primary: cnb`、`resource_download.default: cnb`），中文环境首选 CNB，英文环境首选 GitHub。
+
+更新检查与资源下载都按「主仓库优先」的顺序尝试，某个源失败或持续低速时自动回退到下一个源，并在日志中记录每个源的耗时，例如：
+
+```
+从 cnb 获取最新正式版失败 用时 1.2s 尝试下一个源
+从 github 获取最新正式版成功: v1.5.1 用时 2.9s
+从 cnb 下载成功 用时 0.7s
+```
+
+首次启动时国内环境走 CNB 只需不到 1 秒，不会被 GitHub 源同步拖到超时。
 
 ### 脚本级错误与打转规则
 
@@ -141,6 +168,8 @@ stall:                                  # 卡死 / 原地打转检测
 时间窗与全局截止同时生效：每轮的截止时间取「`deadline_minutes` 计算值」与「本轮时间窗结束时刻」中较早的一个，跑到时间窗结束即收尾，不会占用下一个时间窗。
 
 Runner 单实例互斥使用 `config/state/chain_runner.lock`：默认第二个实例直接退出（退出码 5 并打印持有者 PID），`--wait` 会等待前一个结束，`--fail-fast` 立即退出。锁在进程退出时自动清理。
+
+`--chain` 指定的脚本链不存在时，日志会列出当前可用的脚本链（`未找到，可用：a, b, c`），并提示同步修改 `config/run.yml` 的 `schedule` 与计划任务引用。在设置页重命名脚本链时，若 `schedule` 仍引用旧名，会弹窗提示需要同步修改的位置。
 
 脚本链退出码：
 

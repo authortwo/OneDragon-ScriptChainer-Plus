@@ -24,6 +24,7 @@ from script_chainer.config.script_config import (
     ScriptType,
 )
 from script_chainer.context.script_chainer_context import ScriptChainerContext
+from script_chainer.services.chain_schedule import find_chain_references
 from script_chainer.gui.page.script_edit_interface import ScriptEditInterface
 from script_chainer.gui.page.script_setting_cards import (
     ComputerOpSettingCard,
@@ -166,15 +167,30 @@ class ScriptSettingRootInterface(VerticalScrollInterface):
         dialog = ChainRenameDialog(self.chosen_config.module_name, parent=self.window())
         if dialog.exec():
             new_name = dialog.get_new_name()
+            old_name = self.chosen_config.module_name
             try:
                 new_config = self.ctx.rename_script_chain_config(self.chosen_config, new_name)
                 self.chosen_config = new_config
                 self.update_chain_combo_box()
                 self.chain_combo_box.init_with_value(new_name)
+                self._warn_chain_references(old_name, new_name)
             except ValueError as e:
                 error_dialog = Dialog("错误", str(e), parent=self.window())
                 error_dialog.setTitleBarVisible(False)
                 error_dialog.exec()
+
+    def _warn_chain_references(self, old_name: str, new_name: str) -> None:
+        """重命名后提示仍需手动更新的旧链名引用（F-18）。"""
+        references = find_chain_references(old_name)
+        if not references:
+            return
+        show_warning(
+            self.window(),
+            '脚本链引用未更新',
+            f'脚本链已重命名为 {new_name}，但以下位置仍引用旧名称 {old_name}：\n'
+            + '\n'.join(references)
+            + '\n请同步修改，否则这些位置会因找不到脚本链而跳过。',
+        )
 
     def on_add_script_clicked(self) -> None:
         """新增一个脚本配置"""
