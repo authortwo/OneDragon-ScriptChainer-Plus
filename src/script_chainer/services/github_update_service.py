@@ -24,10 +24,13 @@ from script_chainer.services.download_spec import ResourceDownloadSpec
 if TYPE_CHECKING:
     from script_chainer.context.script_chainer_context import ScriptChainerContext
 
-APP_EXE_NAMES = ('OneDragon ScriptChainer.exe',)
-LEGACY_EXE_NAMES = ('OneDragon ScriptChainer Runner.exe',)
-"""旧版本遗留的独立运行器，升级时清理。"""
-RELEASE_ZIP_PREFIX = 'OneDragon-ScriptChainer'
+APP_EXE_NAMES = ('OneDragon ScriptChainer Plus.exe',)
+LEGACY_EXE_NAMES = (
+    'OneDragon ScriptChainer Runner.exe',
+    'OneDragon ScriptChainer.exe',
+)
+"""旧版本遗留的独立运行器与旧主程序名，升级时清理。"""
+RELEASE_ZIP_PREFIX = 'OneDragon-ScriptChainer-Plus'
 UPDATE_DIR_NAME = 'github_update'
 RUNTIME_DIR_NAME = '.runtime'
 GITHUB_USER_AGENT = 'OneDragon-ScriptChainer'

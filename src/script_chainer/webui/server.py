@@ -611,7 +611,7 @@ def _apply_update(target_tag: str) -> dict:
 
 def create_app() -> FastAPI:
     """构造 FastAPI 应用。"""
-    app = FastAPI(title='千机链', version=__version__, docs_url=None, redoc_url=None)
+    app = FastAPI(title='OneDragon ScriptChainer Plus', version=__version__, docs_url=None, redoc_url=None)
 
     @app.get('/api/bootstrap')
     def bootstrap() -> dict:

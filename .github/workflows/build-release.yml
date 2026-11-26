@@ -134,15 +134,15 @@ jobs:
       run: |
         .\.venv\Scripts\Activate.ps1
         cd deploy
-        pyinstaller "OneDragon ScriptChainer.spec"
+        pyinstaller "OneDragon ScriptChainer Plus.spec"
 
     - name: Upload Editor
       if: ${{ env.CREATE_RELEASE == 'false' }}
       uses: actions/upload-artifact@v4
       with:
-        name: Editor-r${{ github.run_number }}
+        name: Plus-Editor-r${{ github.run_number }}
         include-hidden-files: true
-        path: deploy/dist/OneDragon ScriptChainer/
+        path: deploy/dist/OneDragon ScriptChainer Plus/
 
     - name: Upload Dist
       if: ${{ env.CREATE_RELEASE == 'true' }}
@@ -151,7 +151,7 @@ jobs:
         name: dist
         include-hidden-files: true
         if-no-files-found: error
-        path: deploy/dist/OneDragon ScriptChainer/
+        path: deploy/dist/OneDragon ScriptChainer Plus/
 
   release:
     runs-on: windows-latest
@@ -167,7 +167,7 @@ jobs:
       uses: actions/download-artifact@v4
       with:
         name: dist
-        path: OneDragon ScriptChainer
+        path: OneDragon ScriptChainer Plus
 
     - name: Prepare release packages
       shell: pwsh
@@ -176,7 +176,7 @@ jobs:
       run: |
         $version = $env:RELEASE_VERSION
 
-        Compress-Archive -Path "OneDragon ScriptChainer" -DestinationPath "OneDragon-ScriptChainer-$version.zip" -Force
+        Compress-Archive -Path "OneDragon ScriptChainer Plus" -DestinationPath "OneDragon-ScriptChainer-Plus-$version.zip" -Force
 
 
     - name: Generate Changelog
@@ -294,41 +294,39 @@ jobs:
         tag_name: ${{ needs.build.outputs.tag }}
         name: "Release ${{ needs.build.outputs.version }}"
         body: |
-          ## OneDragon ScriptChainer ${{ needs.build.outputs.version }}
+          ## OneDragon ScriptChainer Plus ${{ needs.build.outputs.version }}
 
           ### 下载说明
 
-          - `OneDragon-ScriptChainer-${{ needs.build.outputs.version }}.zip` - 完整包（编辑器与运行器已合并为一个程序）
+          - `OneDragon-ScriptChainer-Plus-${{ needs.build.outputs.version }}.zip` - 完整包（GUI 与脚本执行器已合并为一个程序）
 
           ### 使用方法
 
-          1. 下载 `OneDragon-ScriptChainer-${{ needs.build.outputs.version }}.zip`
+          1. 下载 `OneDragon-ScriptChainer-Plus-${{ needs.build.outputs.version }}.zip`
           2. 设置中可以自更新。如需手动更新，请先删除旧版的 `.runtime` 文件夹，再解压覆盖
-          3. 运行 `OneDragon ScriptChainer.exe`：双击进入 GUI 创建和编辑脚本链，命令行执行脚本链
+          3. 运行 `OneDragon ScriptChainer Plus.exe`：双击进入 GUI 创建和编辑脚本链，命令行执行脚本链
 
-          > 注意：`OneDragon ScriptChainer.exe` 所在目录包含运行时依赖（`.runtime` 文件夹），请勿单独移动该文件。
+          > 注意：`OneDragon ScriptChainer Plus.exe` 所在目录包含运行时依赖（`.runtime` 文件夹），请勿单独移动该文件。
 
           ### 命令行参数
 
-          `OneDragon ScriptChainer.exe` 支持以下参数:
+          `OneDragon ScriptChainer Plus.exe` 支持以下参数:
 
           | 参数 | 说明 |
           |------|------|
-          | `-o, --onedragon` | 一条龙运行模式（跳过 GUI 直接执行脚本链） |
+          | `-o, --onedragon` | 运行模式（跳过 GUI 直接执行脚本链） |
           | `--chain <名称>` | 指定脚本链名称，默认 `01`（仅 `--onedragon` 模式） |
           | `-s, --shutdown [秒数]` | 运行后关机，可指定延迟秒数，默认 60 秒（仅 `--onedragon` 模式） |
           | `-v, --version` | 显示版本号 |
 
-          示例: `OneDragon ScriptChainer.exe -o --chain 02 -s 120`
-
-          [更多参考](https://one-dragon.com/tools/zh/script_chainer.html)
+          示例: `OneDragon ScriptChainer Plus.exe -o --chain 02 -s 120`
 
           # 更新内容
 
           ${{ steps.changelog.outputs.clean_changelog }}
 
         files: |
-          OneDragon-ScriptChainer-${{ needs.build.outputs.version }}.zip
+          OneDragon-ScriptChainer-Plus-${{ needs.build.outputs.version }}.zip
         generate_release_notes: false
         prerelease: ${{ contains(needs.build.outputs.version, '-beta.') }}
       env:

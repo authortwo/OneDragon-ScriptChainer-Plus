@@ -69,7 +69,7 @@ def run_webui(browser: bool = False, debug: bool = False) -> int:
             import webview
 
             webview.create_window(
-                '千机链',
+                'OneDragon ScriptChainer Plus',
                 url,
                 width=1500,
                 height=940,

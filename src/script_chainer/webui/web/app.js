@@ -1315,10 +1315,10 @@ function App() {
   return html`<div class="app">
     <aside class="sidebar">
       <div class="brand">
-        <img class="brand-logo" src="/static/app_icon.png" alt="千机链" />
+        <img class="brand-logo" src="/static/app_icon.png" alt="OneDragon ScriptChainer Plus" />
         <div class="brand-text">
-          <div class="brand-name">千机链</div>
-          <div class="brand-sub">ScriptChainer ${data.version}</div>
+          <div class="brand-name">ScriptChainer Plus</div>
+          <div class="brand-sub">千机链 · ${data.version}</div>
         </div>
       </div>
 
