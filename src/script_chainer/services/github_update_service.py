@@ -24,10 +24,9 @@ from script_chainer.services.download_spec import ResourceDownloadSpec
 if TYPE_CHECKING:
     from script_chainer.context.script_chainer_context import ScriptChainerContext
 
-APP_EXE_NAMES = (
-    'OneDragon ScriptChainer.exe',
-    'OneDragon ScriptChainer Runner.exe',
-)
+APP_EXE_NAMES = ('OneDragon ScriptChainer.exe',)
+LEGACY_EXE_NAMES = ('OneDragon ScriptChainer Runner.exe',)
+"""旧版本遗留的独立运行器，升级时清理。"""
 RELEASE_ZIP_PREFIX = 'OneDragon-ScriptChainer'
 UPDATE_DIR_NAME = 'github_update'
 RUNTIME_DIR_NAME = '.runtime'
@@ -569,6 +568,14 @@ class GithubUpdateService:
         lines.extend([
             '    throw',
             '}',
+        ])
+        # 早期版本单独发布过运行器，合并后升级时一并清理，避免残留旧 exe
+        for legacy_name in LEGACY_EXE_NAMES:
+            lines.append(
+                f'Remove-Item -LiteralPath {self._ps_quote(str(work_dir / legacy_name))} '
+                '-Force -ErrorAction SilentlyContinue'
+            )
+        lines.extend([
             'Start-Process -FilePath $CurrentExe -WorkingDirectory $WorkDir',
             f'Remove-Item -LiteralPath {self._ps_quote(str(update_dir))} -Recurse -Force',
         ])
