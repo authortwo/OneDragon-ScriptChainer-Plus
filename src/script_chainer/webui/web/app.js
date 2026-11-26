@@ -113,6 +113,9 @@ function Icon({ name, size = 16, strokeWidth = 1.9, className }) {
 function Switch({ on, onChange, title }) {
   return html`<button
     class=${'switch' + (on ? ' on' : '')}
+    role="switch"
+    aria-checked=${!!on}
+    aria-label=${title || '开关'}
     title=${title || ''}
     onClick=${() => onChange(!on)}
   ></button>`;
@@ -161,7 +164,7 @@ function ToggleRow({ title, desc, on, onChange }) {
 function Card({ title, sub, icon, actions, children, bodyClass, headless }) {
   return html`<section class="card">
     ${headless ? null : html`<div class="card-head">
-      ${icon ? html`<span class="muted"><${Icon} name=${icon} size=${16} /></span>` : null}
+      ${icon ? html`<span class="card-head-icon"><${Icon} name=${icon} size=${16} /></span>` : null}
       <div class="grow">
         <div class="card-title">${title}</div>
         ${sub ? html`<div class="card-sub">${sub}</div>` : null}
@@ -371,7 +374,14 @@ function ChainsPage({ data, refresh, notify }) {
                 ${data.chains.map((item) => html`<div
                   key=${item.name}
                   class=${'chain-item' + (item.name === selected ? ' active' : '')}
+                  role="button"
+                  tabIndex=${0}
+                  aria-current=${item.name === selected ? 'true' : undefined}
                   onClick=${() => setSelected(item.name)}
+                  onKeyDown=${(e) => {
+                    if (e.target !== e.currentTarget) return;
+                    if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setSelected(item.name); }
+                  }}
                 >
                   <div class="grow" style=${{ minWidth: 0 }}>
                     <div class="chain-item-name">${item.name}</div>
@@ -436,7 +446,14 @@ function ChainsPage({ data, refresh, notify }) {
                             return html`<div
                               key=${index}
                               class=${'script-card' + (script.enabled ? '' : ' disabled') + (editing === index ? ' editing' : '')}
+                              role="button"
+                              tabIndex=${0}
+                              aria-expanded=${editing === index}
                               onClick=${() => setEditing(editing === index ? null : index)}
+                              onKeyDown=${(e) => {
+                                if (e.target !== e.currentTarget) return;
+                                if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setEditing(editing === index ? null : index); }
+                              }}
                             >
                               <div class="type-bar" style=${{ background: meta.color }}></div>
                               <div class="script-index">${index + 1}</div>
@@ -514,8 +531,14 @@ function ScriptDrawer({ script, index, total, options, onChange, onClose, onRun,
     [key]: text.split('\n').map((item) => item.trim()).filter(Boolean),
   });
 
+  useEffect(() => {
+    const onKey = (e) => { if (e.key === 'Escape') onClose(); };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [onClose]);
+
   return html`<div class="drawer-backdrop" onClick=${onClose}></div>
-  <aside class="drawer" onClick=${(e) => e.stopPropagation()}>
+  <aside class="drawer" role="dialog" aria-modal="true" aria-label="脚本配置" onClick=${(e) => e.stopPropagation()}>
     <div class="drawer-head">
       <div class="drawer-title-row">
         <div class="grow" style=${{ minWidth: 0 }}>
@@ -785,10 +808,10 @@ function SchedulePage({ data, refresh, notify }) {
             <div class="weekday-name">${day.label}</div>
             <div class="weekday-chips">
               ${chains.length === 0
-                ? html`<span class="small muted">未配置</span>`
+                ? html`<span class="tag tag-empty">未配置</span>`
                 : chains.map((name) => html`<span class="tag tag-pre" key=${name}>${name}</span>`)}
             </div>
-            <button class="btn btn-ghost btn-sm" onClick=${() => setEditing(open ? null : day.value)}>
+            <button class="btn btn-ghost btn-sm" aria-expanded=${open} onClick=${() => setEditing(open ? null : day.value)}>
               <${Icon} name=${open ? 'chevron-up' : 'chevron-down'} />${open ? '收起' : '编辑'}
             </button>
           </div>
@@ -1327,6 +1350,7 @@ function App() {
         ${PAGES.filter((item) => item.group === groupName).map((item) => html`<button
           key=${item.key}
           class=${'nav-item' + (page === item.key ? ' active' : '')}
+          title=${item.label}
           onClick=${() => setPage(item.key)}
         >
           <span class="nav-icon"><${Icon} name=${item.icon} size=${16} /></span>
