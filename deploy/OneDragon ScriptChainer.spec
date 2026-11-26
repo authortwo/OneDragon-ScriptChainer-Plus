@@ -14,6 +14,9 @@ a = Analysis(
     hiddenimports=[
         'webview',
         'webview.platforms.edgechromium',
+        # 界面里的「选择文件」按钮依赖系统对话框
+        'tkinter',
+        'tkinter.filedialog',
         'uvicorn.logging',
         'uvicorn.loops',
         'uvicorn.loops.auto',

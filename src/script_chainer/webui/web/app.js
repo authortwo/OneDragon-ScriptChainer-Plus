@@ -2,6 +2,12 @@
 const { useState, useEffect, useMemo, useCallback, useRef } = React;
 const html = htm.bind(React.createElement);
 
+const THEME_KEY = 'qjl-theme';
+const initialTheme = (() => {
+  try { return localStorage.getItem(THEME_KEY) === 'light' ? 'light' : 'dark'; } catch (e) { return 'dark'; }
+})();
+document.documentElement.dataset.theme = initialTheme;
+
 const PAGES = [
   { key: 'chains', label: '脚本链', icon: 'list', group: '运行', desc: '编排脚本执行顺序、依赖与日志规则' },
   { key: 'schedule', label: '周计划', icon: 'calendar-days', group: '运行', desc: '按星期安排每天要运行的脚本链' },
@@ -58,6 +64,19 @@ async function api(path, options = {}) {
   return payload;
 }
 
+async function pickPath(kind, initial, notify) {
+  try {
+    const payload = await api('/api/dialog/pick', {
+      method: 'POST',
+      body: JSON.stringify({ kind: kind === 'pick_dir' ? 'dir' : 'file', initial: initial || '' }),
+    });
+    return (payload && payload.path) || '';
+  } catch (e) {
+    if (notify) notify(`打开选择窗口失败：${e.message}`, true);
+    return '';
+  }
+}
+
 /* ------------------------------ 基础组件 ------------------------------ */
 
 const ATTR_MAP = {
@@ -100,6 +119,28 @@ function Field({ label, children, hint }) {
   return html`<div class="field">
     <label class="field-label">${label}</label>
     ${children}
+    ${hint ? html`<div class="field-hint">${hint}</div>` : null}
+  </div>`;
+}
+
+function PathInput({ label, hint, value, onChange, placeholder, kind = 'pick_file', pickLabel = '选择文件', notify }) {
+  const pick = async () => {
+    const result = await pickPath(kind, value, notify);
+    if (result) onChange(result);
+  };
+  return html`<div class="field">
+    <label class="field-label">${label}</label>
+    <div class="input-group">
+      <input
+        class="input mono"
+        value=${value || ''}
+        placeholder=${placeholder || ''}
+        onInput=${(e) => onChange(e.target.value)}
+      />
+      <button class="btn input-pick" onClick=${pick} type="button">
+        <${Icon} name=${kind === 'pick_dir' ? 'folder-open' : 'file-search'} />${pickLabel}
+      </button>
+    </div>
     ${hint ? html`<div class="field-hint">${hint}</div>` : null}
   </div>`;
 }
@@ -442,11 +483,12 @@ function ChainsPage({ data, refresh, notify }) {
       onChange=${(patch) => updateScript(editing, patch)}
       onClose=${() => setEditing(null)}
       onRun=${() => run(editing)}
+      notify=${notify}
     />` : null}
   </div>`;
 }
 
-function ScriptDrawer({ script, index, total, options, onChange, onClose, onRun }) {
+function ScriptDrawer({ script, index, total, options, onChange, onClose, onRun, notify }) {
   const [tab, setTab] = useState('basic');
   const meta = scriptTypeMeta(script.script_type);
   const isOp = script.script_type === 'computer_op';
@@ -508,9 +550,14 @@ function ScriptDrawer({ script, index, total, options, onChange, onClose, onRun 
             ${options.computer_operation.map((item) => html`<option value=${item.value} key=${item.value}>${item.label}</option>`)}
           </select>
         <//>` : html`
-          <${Field} label=${isPython ? 'Python 脚本路径' : '脚本路径'} hint="支持 exe / bat / py 等可执行文件的完整路径">
-            <input class="input mono" value=${script.script_path || ''} placeholder="C:\\path\\to\\script.exe" onInput=${(e) => onChange({ script_path: e.target.value })} />
-          <//>
+          <${PathInput}
+            label=${isPython ? 'Python 脚本路径' : '脚本路径'}
+            hint="支持 exe / bat / py 等可执行文件的完整路径"
+            value=${script.script_path || ''}
+            placeholder="C:\\path\\to\\script.exe"
+            onChange=${(path) => onChange({ script_path: path })}
+            notify=${notify}
+          />
           <${Field} label="启动参数" hint="原样传给脚本，含空格时请使用引号">
             <input class="input mono" value=${script.script_arguments || ''} placeholder="--auto" onInput=${(e) => onChange({ script_arguments: e.target.value })} />
           <//>
@@ -1048,7 +1095,7 @@ function NotifyPage({ data, refresh, notify }) {
         <${ToggleRow} title="启用推送" desc="关闭后不再发送任何通知" on=${form.enable_notify} onChange=${(value) => setForm({ ...form, enable_notify: value })} />
         <${ToggleRow} title="启动前通知" desc="每轮计划开始前推送一条" on=${form.enable_before_notify} onChange=${(value) => setForm({ ...form, enable_before_notify: value })} />
       </div>
-      <div class="notice" style=${{ marginTop: '16px', color: 'var(--t3)', borderColor: 'var(--line)', background: 'rgba(255,255,255,.02)' }}>
+      <div class="notice hint" style=${{ marginTop: '16px' }}>
         <${Icon} name="info" size=${15} />
         <span class="grow">推送渠道（企业微信、钉钉、飞书等）在 config/notify.yml 中配置，修改后重启生效。</span>
       </div>
@@ -1188,8 +1235,18 @@ function App() {
   const [data, setData] = useState(null);
   const [error, setError] = useState('');
   const [page, setPage] = useState('chains');
+  const [theme, setTheme] = useState(initialTheme);
   const [toast, setToast] = useState(null);
   const toastTimer = useRef(null);
+
+  const toggleTheme = useCallback(() => {
+    setTheme((current) => {
+      const next = current === 'dark' ? 'light' : 'dark';
+      document.documentElement.dataset.theme = next;
+      try { localStorage.setItem(THEME_KEY, next); } catch (e) { /* 忽略存储失败 */ }
+      return next;
+    });
+  }, []);
 
   const notify = useCallback((message, isError = false) => {
     setToast({ message, isError });
@@ -1304,6 +1361,9 @@ function App() {
             ? html`<span class="chip chip-live"><span class="dot"></span>${status.launched.chain} · pid ${status.launched.pid}</span>`
             : null}
           ${status.scheduler_pid ? html`<span class="chip">调度 pid ${status.scheduler_pid}</span>` : null}
+          <button class="icon-btn" onClick=${toggleTheme} title=${theme === 'dark' ? '切换到日间模式' : '切换到夜间模式'}>
+            <${Icon} name=${theme === 'dark' ? 'sun' : 'moon'} />
+          </button>
           <button class="icon-btn" onClick=${refresh} title="刷新"><${Icon} name="refresh-cw" /></button>
         </div>
       </header>

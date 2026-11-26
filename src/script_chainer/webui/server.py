@@ -129,6 +129,13 @@ class SettingsPatch(BaseModel):
     resource_source: str | None = None
 
 
+class DialogRequest(BaseModel):
+    """系统文件 / 目录选择请求。"""
+
+    kind: str = 'file'
+    initial: str = ''
+
+
 class UpdateCheckRequest(BaseModel):
     """检查更新请求。"""
 
@@ -329,6 +336,44 @@ def _settings_payload() -> dict:
             for item in repo_config.resource_sources
         ],
     }
+
+
+def _dialog_initial_dir(initial: str) -> str:
+    """把待选路径转换为对话框的初始目录。"""
+    text = (initial or '').strip().strip('"')
+    if not text:
+        return ''
+    path = text if os.path.isdir(text) else os.path.dirname(text)
+    return path if path and os.path.isdir(path) else ''
+
+
+def pick_local_path(kind: str, initial: str = '') -> str:
+    """弹出系统文件 / 目录选择窗口，返回所选路径；取消时返回空字符串。"""
+    import tkinter as tk
+    from tkinter import filedialog
+
+    root = tk.Tk()
+    root.withdraw()
+    root.attributes('-topmost', True)
+    try:
+        if kind == 'dir':
+            path = filedialog.askdirectory(
+                initialdir=_dialog_initial_dir(initial),
+                title='选择目录',
+                mustexist=False,
+            )
+        else:
+            path = filedialog.askopenfilename(
+                initialdir=_dialog_initial_dir(initial),
+                title='选择文件',
+                filetypes=[
+                    ('可执行文件', '*.exe *.bat *.cmd *.py *.lnk'),
+                    ('所有文件', '*.*'),
+                ],
+            )
+    finally:
+        root.destroy()
+    return path or ''
 
 
 def _options_payload() -> dict:
@@ -788,6 +833,11 @@ def create_app() -> FastAPI:
         if not info['can_update']:
             raise HTTPException(status_code=400, detail=info['message'])
         return _apply_update(info['target'])
+
+    @app.post('/api/dialog/pick')
+    def pick_dialog(body: DialogRequest) -> dict:
+        kind = 'dir' if body.kind == 'dir' else 'file'
+        return {'path': pick_local_path(kind, body.initial)}
 
     @app.get('/')
     def index() -> FileResponse:
