@@ -75,7 +75,7 @@ def run_webui(browser: bool = False, debug: bool = False) -> int:
                 height=940,
                 min_size=(1180, 760),
             )
-            icon_path = Path(__file__).parent / 'web' / 'app_icon.png'
+            icon_path = Path(__file__).parent / 'web' / 'app_icon.ico'
             webview.start(debug=debug, icon=str(icon_path) if icon_path.exists() else None)
         else:
             webbrowser.open(url)
