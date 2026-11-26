@@ -197,10 +197,8 @@ h1 { font-size: 16px; font-weight: 650; letter-spacing: -.01em; margin: 0; }
 .brand { display: flex; align-items: center; gap: 11px; padding: 2px 6px 16px; }
 .brand-logo {
   width: 38px; height: 38px; flex: none; border-radius: 12px;
-  display: grid; place-items: center;
-  background: linear-gradient(135deg, var(--acc), var(--acc2));
-  color: #fff; font-weight: 800; font-size: 16px; letter-spacing: -.04em;
-  box-shadow: 0 10px 24px -10px rgba(91, 140, 255, .9);
+  display: block; object-fit: contain;
+  box-shadow: 0 10px 24px -12px rgba(91, 140, 255, .85);
 }
 .brand-text { min-width: 0; }
 .brand-name { font-size: 14.5px; font-weight: 700; letter-spacing: .01em; }
@@ -228,6 +226,17 @@ h1 { font-size: 16px; font-weight: 650; letter-spacing: -.01em; margin: 0; }
 .nav-item.active::before {
   content: ''; position: absolute; left: 0; top: 9px; bottom: 9px; width: 3px;
   border-radius: 3px; background: linear-gradient(180deg, var(--acc), var(--acc2));
+}
+.nav-icon {
+  width: 28px; height: 28px; flex: none; border-radius: 9px;
+  display: grid; place-items: center;
+  background: var(--glass-strong); color: var(--t2);
+  transition: background .16s, color .16s, box-shadow .16s;
+}
+.nav-item:hover .nav-icon { background: var(--panel3); color: var(--t1); }
+.nav-item.active .nav-icon {
+  background: rgba(91, 140, 255, .18); color: var(--nav-active-icon);
+  box-shadow: inset 0 0 0 1px rgba(91, 140, 255, .28);
 }
 .nav-badge {
   margin-left: auto; font-size: 10px; font-weight: 700; line-height: 1;
@@ -373,15 +382,21 @@ select.input option { background: var(--panel); color: var(--t1); }
 .btn-danger:hover { background: rgba(255, 122, 122, .13); border-color: rgba(255, 122, 122, .45); }
 .btn-ghost { background: transparent; border-color: transparent; color: var(--t2); }
 .btn-ghost:hover { background: var(--hover); color: var(--t1); border-color: transparent; }
+.btn svg, .icon-btn svg, .chip-toggle svg { flex: none; transition: transform .16s ease; }
+.btn:hover svg { transform: translateY(-1px); }
+.btn:active svg { transform: scale(.92); }
+.btn-primary svg { filter: drop-shadow(0 2px 5px rgba(0, 0, 0, .18)); }
 .btn-sm { height: 28px; padding: 0 10px; font-size: 12px; border-radius: 8px; }
 .btn-block { width: 100%; }
 
 .icon-btn {
   width: 32px; height: 32px; border-radius: 9px;
   display: grid; place-items: center; color: var(--t3);
-  transition: background .15s, color .15s;
+  border: 1px solid transparent;
+  transition: background .15s, color .15s, border-color .15s, transform .15s;
 }
-.icon-btn:hover { background: var(--hover); color: var(--t1); }
+.icon-btn:hover { background: var(--hover); border-color: var(--line); color: var(--t1); transform: translateY(-1px); }
+.icon-btn:active { transform: scale(.94); }
 .icon-btn.danger:hover { background: rgba(255, 122, 122, .12); color: var(--danger-fg); }
 
 .switch {
@@ -634,7 +649,7 @@ select.input option { background: var(--panel); color: var(--t1); }
 @media (max-width: 1000px) {
   .sidebar { width: 76px; padding: 16px 10px 14px; }
   .brand { justify-content: center; padding: 0 0 16px; }
-  .brand-text, .nav-label, .nav-item span, .sidebar-foot { display: none; }
+  .brand-text, .nav-label, .nav-item > span:not(.nav-icon), .sidebar-foot { display: none; }
   .nav-item { justify-content: center; padding: 0; }
   .nav-group:first-of-type { margin-top: 4px; }
   .chains-layout { grid-template-columns: 1fr; }

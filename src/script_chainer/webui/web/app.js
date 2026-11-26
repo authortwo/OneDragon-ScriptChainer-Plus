@@ -92,14 +92,17 @@ function _iconProps(attrs, extra) {
   return props;
 }
 
-function Icon({ name, size = 16 }) {
+function Icon({ name, size = 16, strokeWidth = 1.9, className }) {
   const pascal = String(name).split('-').map((part) => part.charAt(0).toUpperCase() + part.slice(1)).join('');
   const icons = (window.lucide && window.lucide.icons) || {};
   const node = icons[pascal];
   if (!node) return null;
+  const props = _iconProps(node[1], { width: size, height: size });
+  props.strokeWidth = strokeWidth;
+  if (className) props.className = className;
   return React.createElement(
     node[0],
-    _iconProps(node[1], { width: size, height: size }),
+    props,
     (node[2] || []).map((child, index) => React.createElement(
       child[0],
       _iconProps(child[1], { key: index }),
@@ -1312,7 +1315,7 @@ function App() {
   return html`<div class="app">
     <aside class="sidebar">
       <div class="brand">
-        <div class="brand-logo">千</div>
+        <img class="brand-logo" src="/static/app_icon.png" alt="千机链" />
         <div class="brand-text">
           <div class="brand-name">千机链</div>
           <div class="brand-sub">ScriptChainer ${data.version}</div>
@@ -1326,7 +1329,7 @@ function App() {
           class=${'nav-item' + (page === item.key ? ' active' : '')}
           onClick=${() => setPage(item.key)}
         >
-          <${Icon} name=${item.icon} size=${17} />
+          <span class="nav-icon"><${Icon} name=${item.icon} size=${16} /></span>
           <span>${item.label}</span>
         </button>`)}
       </div>`)}

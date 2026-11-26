@@ -7,6 +7,7 @@ import sys
 import threading
 import time
 import webbrowser
+from pathlib import Path
 
 
 def _find_free_port() -> int:
@@ -74,7 +75,8 @@ def run_webui(browser: bool = False, debug: bool = False) -> int:
                 height=940,
                 min_size=(1180, 760),
             )
-            webview.start(debug=debug)
+            icon_path = Path(__file__).parent / 'web' / 'app_icon.png'
+            webview.start(debug=debug, icon=str(icon_path) if icon_path.exists() else None)
         else:
             webbrowser.open(url)
             while True:
