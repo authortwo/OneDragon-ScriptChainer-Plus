@@ -2196,9 +2196,6 @@ function RulesPage({ data, notify }) {
       title="规则集"
       sub=${ruleDir || '规则文件目录'}
       icon="scroll-text"
-      actions=${html`<button class="btn" onClick=${importFile} disabled=${busy}>
-        <${Icon} name=${busy ? 'loader-2' : 'upload'} className=${busy ? 'spinner' : ''} />加载规则文件
-      </button>`}
     >
       <div class="rule-game-bar">
         <span class="rule-game-label">游戏</span>
@@ -2210,9 +2207,9 @@ function RulesPage({ data, notify }) {
       </div>
 
       ${profiles.length === 0
-        ? html`<${EmptyState} icon="scroll-text" title="还没有规则文件" desc="点右上角加载一个 .yml 规则集，或把文件放进规则目录后刷新" />`
+        ? html`<${EmptyState} icon="scroll-text" title="还没有规则文件" desc="在下方加载一个 .yml 规则集，或把文件放进规则目录后刷新" />`
         : visibleProfiles.length === 0
-          ? html`<${EmptyState} icon="filter" title="该游戏还没有规则集" desc="换一个游戏，或点右上角加载支持该游戏的 .yml 规则集" />`
+          ? html`<${EmptyState} icon="filter" title="该游戏还没有规则集" desc="换一个游戏，或在下方加载支持该游戏的 .yml 规则集" />`
           : html`<div class="profile-list">
               ${visibleProfiles.map((item) => html`<button
                 key=${item.id}
@@ -2245,6 +2242,13 @@ function RulesPage({ data, notify }) {
           <span class="chip"><${Icon} name="bug" size=${12} />忽略 ${profile.levels.ignore}</span>
         </div>
       </div>` : null}
+
+      <div class="rule-import-row">
+        <span class="small muted grow">导入 .yml 规则集文件，会按当前所选游戏校验</span>
+        <button class="btn" onClick=${importFile} disabled=${busy}>
+          <${Icon} name=${busy ? 'loader-2' : 'upload'} className=${busy ? 'spinner' : ''} />加载规则文件
+        </button>
+      </div>
     <//>
 
     ${profile && profile.error
