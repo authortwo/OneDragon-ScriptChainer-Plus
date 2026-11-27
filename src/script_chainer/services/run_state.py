@@ -36,6 +36,11 @@ _STATUS_BY_EXIT_CODE: dict[int, str] = {
 """退出码到当日状态的映射：0 成功、3 到达截止、4 锁屏阻断，其余视为中断可补跑。"""
 
 
+def status_from_exit_code(exit_code: int) -> str:
+    """把退出码映射成当日状态，供运行报告等外部记录复用同一口径。"""
+    return _STATUS_BY_EXIT_CODE.get(exit_code, STATUS_INTERRUPTED)
+
+
 class DailyRunState:
     """记录当天计划的执行状态，供「每日一次」判断是否需要补跑。
 
@@ -119,7 +124,7 @@ class DailyRunState:
         """记录运行结束：0 已完成、3 已到截止、4 锁屏跳过，其余记为已中断（允许补跑）。"""
         self._write({
             'date': date.isoformat(),
-            'status': _STATUS_BY_EXIT_CODE.get(exit_code, STATUS_INTERRUPTED),
+            'status': status_from_exit_code(exit_code),
             'pid': None,
             'chains': list(chains),
             'started_at': started_at,

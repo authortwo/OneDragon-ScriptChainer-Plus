@@ -37,8 +37,8 @@ def describe_schedule(run_config: RunConfig, date: datetime.date) -> str:
     """生成便于日志阅读的今日计划说明。"""
     schedule = run_config.schedule
     key = WEEKDAY_KEYS[date.weekday()]
-    source = key if key in schedule else (
-        SCHEDULE_DEFAULT_KEY if SCHEDULE_DEFAULT_KEY in schedule else '未配置'
+    source = key if schedule.get(key) else (
+        SCHEDULE_DEFAULT_KEY if schedule.get(SCHEDULE_DEFAULT_KEY) else '未配置'
     )
     chains = resolve_chains_for_date(run_config, date)
     return f'今日计划({source}): {", ".join(chains) if chains else "(空)"}'

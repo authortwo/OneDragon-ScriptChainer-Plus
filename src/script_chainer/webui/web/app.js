@@ -409,6 +409,24 @@ function ChainsPage({ data, refresh, notify }) {
     }
   };
 
+  const copyChain = async () => {
+    if (!selected) return;
+    setBusy(true);
+    try {
+      const payload = await api(`/api/chains/${encodeURIComponent(selected)}/copy`, {
+        method: 'POST',
+        body: JSON.stringify({}),
+      });
+      setSelected(payload.name);
+      notify(`已复制为 ${payload.name}`);
+      refresh();
+    } catch (e) {
+      notify(e.message, true);
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const removeChain = async () => {
     if (!selected) return;
     try {
@@ -526,6 +544,7 @@ function ChainsPage({ data, refresh, notify }) {
                 <button class="btn" onClick=${stop} title="结束由控制台启动的运行实例"><${Icon} name="square" />停止</button>
                 <button class="btn" onClick=${() => run(null)}><${Icon} name="play" />运行</button>
                 <button class="btn btn-primary" onClick=${save} disabled=${busy || !dirty}><${Icon} name="save" />保存</button>
+                <button class="icon-btn" title="复制脚本链" onClick=${copyChain} disabled=${busy}><${Icon} name="copy" /></button>
                 ${confirmingDelete
                   ? html`<button class="btn btn-danger" onClick=${removeChain}>确认删除</button>`
                   : html`<button class="icon-btn danger" title="删除脚本链" onClick=${() => setConfirmingDelete(true)}><${Icon} name="trash-2" /></button>`}
@@ -1060,6 +1079,7 @@ function SchedulePage({ data, refresh, notify }) {
   useEffect(() => { setSchedule(data.run_config.schedule || {}); }, [data.run_config.schedule]);
 
   const chainNames = data.chains.map((item) => item.name);
+  const fallbackChains = schedule.default || [];
 
   const toggleChain = (day, name) => {
     setSchedule((current) => {
@@ -1107,29 +1127,37 @@ function SchedulePage({ data, refresh, notify }) {
 
     <${Card} title="周计划" sub="未单独配置的星期会回退到「默认」" icon="calendar-days" bodyClass="tight">
       ${data.options.weekdays.map((day) => {
-        const chains = schedule[day.value] || [];
+        const own = schedule[day.value] || [];
+        const usingDefault = day.value !== 'default' && own.length === 0 && fallbackChains.length > 0;
+        const shown = usingDefault ? fallbackChains : own;
         const open = editing === day.value;
         return html`<div key=${day.value}>
           <div class="weekday-row">
             <div class="weekday-name">${day.label}</div>
             <div class="weekday-chips">
-              ${chains.length === 0
+              ${shown.length === 0
                 ? html`<span class="tag tag-empty">未配置</span>
                     <span class="small muted">${day.value === 'default' ? '未单独配置的星期沿用这里' : '当天不运行'}</span>`
-                : chains.map((name) => html`<span class="tag tag-pre" key=${name}>${name}</span>`)}
+                : html`${shown.map((name) => html`<span class="tag tag-pre" key=${name}>${name}</span>`)}
+                    ${usingDefault
+                      ? html`<span class="tag tag-off" title="当天未单独配置，实际运行「默认」配置">沿用默认</span>`
+                      : null}`}
             </div>
             <button class="btn btn-ghost btn-sm" aria-expanded=${open} onClick=${() => setEditing(open ? null : day.value)}>
               <${Icon} name=${open ? 'chevron-up' : 'chevron-down'} />${open ? '收起' : '编辑'}
             </button>
           </div>
           ${open ? html`<div class="weekday-edit">
+            ${usingDefault
+              ? html`<span class="small muted" style=${{ width: '100%' }}>当天未单独配置，勾选脚本后才会覆盖「默认」配置。</span>`
+              : null}
             ${chainNames.length === 0
               ? html`<span class="small muted">还没有脚本链，请先在「脚本链」页新建</span>`
               : chainNames.map((name) => html`<button
                   key=${name}
-                  class=${'chip-toggle' + (chains.includes(name) ? ' on' : '')}
+                  class=${'chip-toggle' + (own.includes(name) ? ' on' : '')}
                   onClick=${() => toggleChain(day.value, name)}
-                >${chains.includes(name) ? '✓ ' : ''}${name}</button>`)}
+                >${own.includes(name) ? '✓ ' : ''}${name}</button>`)}
           </div>` : null}
         </div>`;
       })}
@@ -2483,7 +2511,9 @@ function SettingsPage({ data, refresh, notify }) {
 
       <${Card} title="运行环境" icon="monitor" sub="当前版本与进程状态">
         <div class="kv"><span class="k">当前版本</span><span class="v mono">${data.version}</span></div>
-        <div class="kv"><span class="k">今日状态</span><span class="v">${data.status.daily_label}</span></div>
+        <div class="kv"><span class="k">今日状态</span><span class="v">${data.status.daily_label}${data.status.daily_note
+          ? html`<span class="small muted" style=${{ marginLeft: '6px' }}>${data.status.daily_note}</span>`
+          : null}</span></div>
         <div class="kv"><span class="k">常驻调度</span><span class="v">${data.status.scheduler_pid ? `运行中 (pid=${data.status.scheduler_pid})` : '未运行'}</span></div>
         <div class="kv"><span class="k">运行实例</span><span class="v">${data.status.runner_pid ? `运行中 (pid=${data.status.runner_pid})` : '未运行'}</span></div>
         <div class="kv"><span class="k">配置文件</span><span class="v mono">config/run.yml</span></div>
@@ -2616,7 +2646,7 @@ function App() {
         <div class="status-card">
           <div class="status-row">
             <span class="status-k">今日</span>
-            <span class=${'badge ' + badgeClass}>${status.daily_label}</span>
+            <span class=${'badge ' + badgeClass} title=${status.daily_note || status.daily_label}>${status.daily_label}</span>
           </div>
           <div class="status-row">
             <span class="status-k">常驻调度</span>

@@ -44,7 +44,14 @@ from script_chainer.config.script_config import (
 from script_chainer.services import chain_schedule, log_rules, push_settings
 from script_chainer.services.autostart import launch_daemon_now, launch_plan_now
 from script_chainer.services.script_rules import parse_fail_fast, parse_loop
-from script_chainer.services.run_state import STATUS_LABELS, DailyRunState
+from script_chainer.services.run_state import (
+    STATUS_INTERRUPTED,
+    STATUS_LABELS,
+    STATUS_NOT_STARTED,
+    STATUS_RUNNING,
+    DailyRunState,
+    status_from_exit_code,
+)
 from script_chainer.services.single_instance import SingleInstanceLock
 
 WEB_DIR = Path(__file__).resolve().parent / 'web'
@@ -83,6 +90,12 @@ class CreateChainRequest(BaseModel):
     """新建脚本链请求。"""
 
     name: str
+
+
+class CopyChainRequest(BaseModel):
+    """复制脚本链请求，name 留空时自动取「原名 副本」。"""
+
+    name: str | None = None
 
 
 class LaunchRequest(BaseModel):
@@ -260,8 +273,38 @@ def run_config_payload() -> dict:
     }
 
 
+def _report_status_today(today: datetime.date) -> tuple[str, str] | None:
+    """读最近一次运行报告，结束于今天时返回 (状态, 链名)。
+
+    仅用于展示兜底：GUI 手动运行不写 daily_run.yml，但脚本运行器结束时
+    会写 config/state/last-report.json，可据此反映今天确实跑过。
+    """
+    report_path = _state_dir() / 'last-report.json'
+    if not report_path.exists():
+        return None
+    try:
+        report = json.loads(report_path.read_text(encoding='utf-8'))
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(report, dict):
+        return None
+    ended_at = str(report.get('ended_at') or report.get('started_at') or '')
+    if not ended_at.startswith(today.isoformat()):
+        return None
+    try:
+        exit_code = int(report.get('exit_code'))
+    except (TypeError, ValueError):
+        exit_code = -1
+    return status_from_exit_code(exit_code), str(report.get('chain') or '')
+
+
 def status_payload() -> dict:
-    """今日状态与进程占用。"""
+    """今日状态与进程占用。
+
+    持久化状态来自 daily_run.yml（只由调度守护写入）；GUI 手动运行不写该文件，
+    因此这里在展示层叠加活动进程与当日运行报告，避免「已经执行过仍显示未开始」。
+    该叠加不改写 daily_run.yml，不影响 once_per_day 的补跑判断。
+    """
     today = datetime.date.today()
     state = DailyRunState()
     record = state.load()
@@ -270,6 +313,23 @@ def status_payload() -> dict:
     runner_pid = SingleInstanceLock('chain_runner').holder_pid
     scheduler_pid = SingleInstanceLock().holder_pid
     runtime = _runtime_payload()
+    runner_alive = runner_pid if _pid_alive(runner_pid) else None
+    scheduler_alive = scheduler_pid if _pid_alive(scheduler_pid) else None
+
+    note = ''
+    if runtime['pid'] or runner_alive:
+        status = STATUS_RUNNING
+        running_chain = runtime['chain'] or ' → '.join(record.get('chains') or [])
+        note = f'运行中 · {running_chain}' if running_chain else '运行中'
+    elif status == STATUS_RUNNING:
+        # 记录停在运行中但进程已退出：与 should_start 的判定保持一致，视为可补跑
+        status = STATUS_INTERRUPTED
+        note = '运行实例已退出，可补跑'
+    elif status == STATUS_NOT_STARTED:
+        report_status = _report_status_today(today)
+        if report_status is not None:
+            status, report_chain = report_status
+            note = f'最近一次运行 · {report_chain}' if report_chain else '最近一次运行'
 
     return {
         'today': today.isoformat(),
@@ -277,6 +337,7 @@ def status_payload() -> dict:
         'weekday_label': WEEKDAY_LABELS[WEEKDAY_KEYS[today.weekday()]],
         'daily_status': status,
         'daily_label': STATUS_LABELS.get(status, ''),
+        'daily_note': note,
         'daily_record': {
             'date': record.get('date'),
             'chains': record.get('chains') or [],
@@ -284,8 +345,8 @@ def status_payload() -> dict:
             'finished_at': record.get('finished_at'),
             'exit_code': record.get('exit_code'),
         },
-        'runner_pid': runner_pid if _pid_alive(runner_pid) else None,
-        'scheduler_pid': scheduler_pid if _pid_alive(scheduler_pid) else None,
+        'runner_pid': runner_alive,
+        'scheduler_pid': scheduler_alive,
         'launched': runtime,
     }
 
@@ -378,6 +439,21 @@ def _chain_payload(name: str) -> dict:
 
 def _chain_exists(name: str) -> bool:
     return name in chain_schedule.list_available_chains()
+
+
+def _invalid_chain_name(name: str) -> bool:
+    return not name or any(char in name for char in '\\/:*?"<>|')
+
+
+def _unique_chain_name(base: str) -> str:
+    """在已有脚本链里找一个不冲突的名字：base、base2、base3……"""
+    existing = set(chain_schedule.list_available_chains())
+    if base not in existing:
+        return base
+    index = 2
+    while f'{base}{index}' in existing:
+        index += 1
+    return f'{base}{index}'
 
 
 def _notify_config() -> NotifyConfig:
@@ -728,7 +804,7 @@ def create_app() -> FastAPI:
     @app.post('/api/chains')
     def create_chain(body: CreateChainRequest) -> dict:
         name = body.name.strip()
-        if not name or any(char in name for char in '\\/:*?"<>|'):
+        if _invalid_chain_name(name):
             raise HTTPException(status_code=400, detail='脚本链名称不能为空或包含路径字符')
         if _chain_exists(name):
             raise HTTPException(status_code=409, detail=f'脚本链 {name} 已存在')
@@ -736,6 +812,34 @@ def create_app() -> FastAPI:
         config.script_list = []
         config.save()
         return _chain_payload(name)
+
+    @app.post('/api/chains/{name}/copy')
+    def copy_chain(name: str, body: CopyChainRequest | None = None) -> dict:
+        if not _chain_exists(name):
+            raise HTTPException(status_code=404, detail=f'脚本链 {name} 不存在')
+
+        requested = (body.name or '').strip() if body else ''
+        if requested:
+            if _invalid_chain_name(requested):
+                raise HTTPException(status_code=400, detail='脚本链名称不能为空或包含路径字符')
+            if _chain_exists(requested):
+                raise HTTPException(status_code=409, detail=f'脚本链 {requested} 已存在')
+            target = requested
+        else:
+            target = _unique_chain_name(f'{name} 副本')
+
+        source = ScriptChainConfig(name)
+        allowed = ScriptChainConfig._script_config_fields
+        config = ScriptChainConfig(target)
+        config.script_list = [
+            ScriptConfig(**{
+                key: value for key, value in script.to_dict().items() if key in allowed
+            })
+            for script in source.script_list
+        ]
+        config.init_idx()
+        config.save()
+        return _chain_payload(target)
 
     @app.put('/api/chains/{name}')
     def save_chain(name: str, body: ChainPatch) -> dict:

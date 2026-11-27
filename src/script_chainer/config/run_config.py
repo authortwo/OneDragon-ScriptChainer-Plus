@@ -280,11 +280,15 @@ class RunConfig(YamlConfig):
         return result
 
     def chains_for_weekday(self, weekday: int) -> list[str]:
-        """取某一天应运行的链列表：优先当天键，其次 default 兜底。"""
+        """取某一天应运行的链列表：优先当天键，其次 default 兜底。
+
+        当天没有配置或配置为空列表（例如页面保存时写入的 ``[]``）都视为未单独配置，
+        统一回退到 default，避免「设置了默认却只有部分星期生效」。
+        """
         schedule = self.schedule
         key = WEEKDAY_KEYS[weekday % len(WEEKDAY_KEYS)]
         chains = schedule.get(key)
-        if chains is None:
+        if not chains:
             chains = schedule.get(SCHEDULE_DEFAULT_KEY, [])
         return list(chains)
 
