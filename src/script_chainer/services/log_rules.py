@@ -2,6 +2,8 @@
 
 规则文件放在 ``config/rules/*.yml``，结构见 ``config/rules/bettergi.yml``：
 
+- ``games``：该文件支持的游戏（取脚本配置里的游戏进程名，如 ``YuanShen.exe``）；
+  可写多个，留空表示通用，界面按所选游戏过滤规则集；
 - ``rules``（level=fatal/task/ignore）：任务级错误规则，命中即判失败或放行；
 - ``stall``：同一行在窗口内反复出现，判原地打转；
 - ``loop``：状态机原地轮转，判状态卡死（试跑诊断用）。
@@ -29,6 +31,7 @@ from pathlib import Path
 import yaml
 
 from one_dragon.utils import os_utils
+from script_chainer.config.script_config import GameProcessName
 from script_chainer.services.script_rules import normalize_line
 
 LEVELS = ('fatal', 'task', 'ignore')
@@ -91,6 +94,36 @@ def _load_yaml(path: Path) -> dict:
     if not isinstance(data, dict):
         raise RuleFileError('文件内容必须是一个 YAML 映射')
     return data
+
+
+def game_label(value: str) -> str:
+    """把游戏进程名映射成界面显示名，未收录的自定义游戏原样返回。"""
+    for item in GameProcessName:
+        if item.value.value == value:
+            return item.value.label
+    return value
+
+
+def _game_list(data: dict) -> list[str]:
+    """读取规则文件声明的支持游戏，兼容旧的单个 ``game`` 写法。"""
+    raw = data.get('games')
+    if raw is None:
+        raw = data.get('game')
+    if raw is None:
+        return []
+    if isinstance(raw, str):
+        items = [raw]
+    elif isinstance(raw, (list, tuple)):
+        items = list(raw)
+    else:
+        raise RuleFileError('games 应为游戏列表')
+
+    games: list[str] = []
+    for item in items:
+        name = str(item or '').strip()
+        if name and name not in games:
+            games.append(name)
+    return games
 
 
 def _validate(data: dict, path: Path) -> dict:
@@ -158,6 +191,7 @@ def _validate(data: dict, path: Path) -> dict:
         'description': str(data.get('description') or ''),
         'version': int(data.get('version') or 1),
         'path': str(path),
+        'games': _game_list(data),
         'source': data.get('source') or {},
         'fail_fast': data.get('fail_fast') or {},
         'stall': data.get('stall') or {},
@@ -181,6 +215,7 @@ def _summary(profile: dict) -> dict:
         'description': profile['description'],
         'path': profile['path'],
         'version': profile['version'],
+        'games': profile['games'],
         'source': profile['source'],
         'total': len(profile['rules']),
         'levels': counts,
@@ -204,7 +239,7 @@ def list_profiles() -> list[dict]:
         except RuleFileError as exc:
             out.append({
                 'id': path.stem, 'name': path.stem, 'description': '',
-                'path': str(path), 'version': 0, 'source': {}, 'total': 0,
+                'path': str(path), 'version': 0, 'games': [], 'source': {}, 'total': 0,
                 'levels': {level: 0 for level in LEVELS},
                 'fail_fast': {}, 'stall': {}, 'loop': {}, 'probe': {}, 'error': str(exc),
             })
@@ -237,8 +272,15 @@ def _resolve(profile_id: str) -> Path:
     return path
 
 
-def import_profile(source: str, overwrite: bool = False) -> dict:
-    """从任意路径导入规则文件到规则目录，校验通过才落盘。"""
+def import_profile(source: str, overwrite: bool = False, game: str | None = None) -> dict:
+    """从任意路径导入规则文件到规则目录，校验通过才落盘。
+
+    Args:
+        source: 待导入的 .yml / .yaml 文件路径。
+        overwrite: 同名规则集已存在时是否覆盖。
+        game: 界面当前选中的游戏；提供时校验规则集是否支持该游戏，
+            未声明 games 的通用规则集不拦截。
+    """
     src = Path(str(source).strip())
     if not src.is_file():
         raise RuleFileError(f'文件不存在：{src}')
@@ -246,6 +288,12 @@ def import_profile(source: str, overwrite: bool = False) -> dict:
         raise RuleFileError('只支持 .yml / .yaml 规则文件')
 
     profile = _read(src)
+    if game and profile['games'] and game not in profile['games']:
+        supported = '、'.join(game_label(item) for item in profile['games'])
+        raise RuleFileError(
+            f'规则集 {profile["name"]} 只支持 {supported}，'
+            f'与当前选择的 {game_label(game)} 不匹配'
+        )
     target = rules_dir() / f"{profile['id']}.yml"
     if target.exists() and not overwrite and target.resolve() != src.resolve():
         raise RuleFileError(f'规则集 {profile["id"]} 已存在，勾选覆盖后再导入')

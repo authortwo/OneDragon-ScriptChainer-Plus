@@ -20,6 +20,9 @@ id: maa_bbb
 name: MAA（崩坏3 · 崩坏3一条龙）
 description: MaaFW 框架的任务级错误与卡死打转判定
 
+# 支持的游戏：取脚本配置里的游戏进程名，可写多个；留空表示通用，任何游戏都能加载。
+games: ['BH3.exe']
+
 source:
   log_dir: D:\Games\Tools\Maa_bbb\debug
   files: 21

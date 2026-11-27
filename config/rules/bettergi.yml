@@ -19,6 +19,10 @@ id: bettergi
 name: BetterGI（原神）
 description: 一条龙脚本的任务级错误与卡死打转判定
 
+# 支持的游戏：取脚本配置里的游戏进程名，可写多个；留空表示通用，任何游戏都能加载。
+# 界面先选游戏，再列出支持该游戏的规则集。
+games: ['YuanShen.exe']
+
 source:
   log_dir: D:\Games\Tools\BetterGI\log
   files: 18

@@ -181,6 +181,7 @@ class RuleImportRequest(BaseModel):
 
     path: str
     overwrite: bool = False
+    game: str | None = None
 
 
 class RuleProbeRequest(BaseModel):
@@ -1071,7 +1072,7 @@ def create_app() -> FastAPI:
     @app.post('/api/rules/import')
     def import_rule_profile(body: RuleImportRequest) -> dict:
         try:
-            profile = log_rules.import_profile(body.path, body.overwrite)
+            profile = log_rules.import_profile(body.path, body.overwrite, body.game)
         except log_rules.RuleFileError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         return {'profile': profile, 'profiles': log_rules.list_profiles()}
@@ -1130,8 +1131,21 @@ def create_app() -> FastAPI:
     def index() -> FileResponse:
         return FileResponse(WEB_DIR / 'index.html')
 
-    app.mount('/static', StaticFiles(directory=WEB_DIR), name='static')
+    app.mount('/static', _FreshStaticFiles(directory=WEB_DIR), name='static')
     return app
+
+
+class _FreshStaticFiles(StaticFiles):
+    """静态资源只走协商缓存。
+
+    桌面壳每次升级都会替换 app.js / styles.css，浏览器按启发式缓存会继续用旧文件，
+    表现为「改了界面但看不到」。强制 no-cache 后每次用 ETag 校验，本地开销可以忽略。
+    """
+
+    def file_response(self, *args: Any, **kwargs: Any):
+        response = super().file_response(*args, **kwargs)
+        response.headers['Cache-Control'] = 'no-cache'
+        return response
 
 
 def _save_schedule(config: RunConfig, schedule: dict[str, list[str]]) -> None:

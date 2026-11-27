@@ -56,6 +56,33 @@ class ProfileLoadTest(unittest.TestCase):
         ids = [item['id'] for item in log_rules.list_profiles()]
         self.assertIn('bettergi', ids)
 
+    def test_profiles_declare_games(self):
+        """每个内置规则集都应声明支持的游戏，供界面按游戏过滤。"""
+        self.assertEqual(log_rules.get_profile('bettergi')['games'], ['YuanShen.exe'])
+        self.assertEqual(log_rules.get_profile('maa_bbb')['games'], ['BH3.exe'])
+        self.assertEqual(log_rules.get_profile('zzz_onedragon')['games'], ['ZenlessZoneZero.exe'])
+
+    def test_game_label(self):
+        self.assertEqual(log_rules.game_label('YuanShen.exe'), '原神')
+        self.assertEqual(log_rules.game_label('custom.exe'), 'custom.exe')
+
+    def test_import_rejects_other_game(self):
+        """导入时按当前所选游戏校验，别的游戏的规则集直接拒绝。"""
+        with tempfile.TemporaryDirectory() as tmp:
+            src = Path(tmp) / 'other_game.yml'
+            src.write_text(
+                'id: __test_other_game__\n'
+                'name: 其它游戏规则\n'
+                "games: ['BH3.exe']\n"
+                'rules:\n'
+                '  - id: r1\n'
+                '    match: ERROR\n'
+                '    level: task\n',
+                encoding='utf-8',
+            )
+            with self.assertRaises(log_rules.RuleFileError):
+                log_rules.import_profile(str(src), game='YuanShen.exe')
+
     def test_missing_profile_raises(self):
         with self.assertRaises(log_rules.RuleFileError):
             log_rules.get_profile('__not_exists__')

@@ -231,6 +231,12 @@ function scriptTypeMeta(type) {
   return TYPE_META[type] || TYPE_META.external;
 }
 
+/* 规则集是否支持某个游戏：未声明 games 的规则文件视为通用，任何游戏都能用 */
+function profileSupportsGame(profile, game) {
+  const games = profile.games || [];
+  return games.length === 0 || (!!game && games.includes(game));
+}
+
 /* 与后端 _script_rule_summary 同口径，额外用于展示「刚改还没保存」的状态 */
 function ruleSummary(script) {
   const rawFailFast = script.fail_fast || {};
@@ -701,6 +707,17 @@ function ScriptDrawer({ script, index, total, options, onChange, onClose, onRun,
   const [ruleBusy, setRuleBusy] = useState(false);
   const processNames = Array.isArray(script.script_process_name) ? script.script_process_name : [];
 
+  const gameValue = script.game_process_name || '';
+  const gameText = (options.game.find((item) => item.value === gameValue) || {}).label || gameValue;
+  // 规则来源下拉按脚本已设置的游戏过滤，避免把别的游戏的规则填进来
+  const availableProfiles = gameValue
+    ? ruleProfiles.filter((item) => profileSupportsGame(item, gameValue))
+    : ruleProfiles;
+
+  useEffect(() => {
+    if (rulePick && !availableProfiles.some((item) => item.id === rulePick)) setRulePick('');
+  }, [rulePick, gameValue, ruleProfiles]);
+
   const patchFailFast = (patch) => onChange({ fail_fast: { ...failFast, ...patch } });
   const patchStall = (patch) => onChange({ stall: { ...stall, ...patch } });
   const patchLoop = (patch) => onChange({ loop: { ...loop, ...patch } });
@@ -919,7 +936,7 @@ function ScriptDrawer({ script, index, total, options, onChange, onClose, onRun,
           <div class="row" style=${{ gap: '8px' }}>
             <select class="input grow" value=${rulePick} onChange=${(e) => setRulePick(e.target.value)}>
               <option value="">选择规则集…</option>
-              ${ruleProfiles.map((item) => html`<option value=${item.id} key=${item.id}>
+              ${availableProfiles.map((item) => html`<option value=${item.id} key=${item.id}>
                 ${item.name}${item.error ? '（文件有误）' : ` · ${item.total} 条`}
               </option>`)}
             </select>
@@ -928,9 +945,13 @@ function ScriptDrawer({ script, index, total, options, onChange, onClose, onRun,
             </button>
           </div>
           <div class="field-hint">
-            ${ruleProfiles.length
-              ? '填入会覆盖下面三块的当前值，但不保存；点抽屉底部「完成」才写进脚本链。'
-              : '还没有可用规则集，可到「日志规则」页加载 .yml 后再回来。'}
+            ${!availableProfiles.length
+              ? (gameValue
+                  ? `当前游戏（${gameText}）还没有匹配的规则集，可到「日志规则」页加载支持该游戏的 .yml。`
+                  : '还没有可用规则集，可到「日志规则」页加载 .yml 后再回来。')
+              : gameValue
+                ? `只显示支持「${gameText}」的规则集；填入会覆盖下面三块，但不保存。`
+                : '为脚本设置游戏后，这里只显示支持该游戏的规则集；填入会覆盖下面三块，但不保存。'}
           </div>
         </div>
 
@@ -1982,6 +2003,7 @@ function ParamGrid({ items }) {
 function RulesPage({ data, notify }) {
   const [profiles, setProfiles] = useState([]);
   const [ruleDir, setRuleDir] = useState('');
+  const [game, setGame] = useState('');
   const [activeId, setActiveId] = useState('');
   const [profile, setProfile] = useState(null);
   const [loading, setLoading] = useState(true);
@@ -1993,6 +2015,25 @@ function RulesPage({ data, notify }) {
   const [chainScripts, setChainScripts] = useState([]);
   const [scriptIndex, setScriptIndex] = useState(0);
   const [applying, setApplying] = useState(false);
+
+  const gameOptions = data.options.game || [];
+  const gameLabel = (value) => {
+    const hit = gameOptions.find((item) => item.value === value);
+    return hit ? hit.label : value;
+  };
+  // 游戏选择器只列出「确实有规则集支持」的游戏，避免一堆空选项
+  const supportedGames = useMemo(() => {
+    const used = [];
+    profiles.forEach((item) => (item.games || []).forEach((value) => {
+      if (!used.includes(value)) used.push(value);
+    }));
+    const known = gameOptions.filter((item) => used.includes(item.value));
+    const unknown = used.filter((value) => !gameOptions.some((item) => item.value === value));
+    return [...known, ...unknown.map((value) => ({ label: value, value }))];
+  }, [profiles, data.options.game]);
+  const visibleProfiles = game
+    ? profiles.filter((item) => profileSupportsGame(item, game))
+    : profiles;
 
   const loadProfile = async (id) => {
     if (!id) return;
@@ -2013,6 +2054,21 @@ function RulesPage({ data, notify }) {
     }
   };
 
+  const pickGame = (value) => {
+    setGame(value);
+    const next = value
+      ? profiles.filter((item) => profileSupportsGame(item, value))
+      : profiles;
+    if (next.some((item) => item.id === activeId)) return;
+    if (next.length) {
+      loadProfile(next[0].id);
+    } else {
+      setActiveId('');
+      setProfile(null);
+      setProbe(null);
+    }
+  };
+
   useEffect(() => {
     (async () => {
       try {
@@ -2020,7 +2076,14 @@ function RulesPage({ data, notify }) {
         const list = payload.profiles || [];
         setProfiles(list);
         setRuleDir(payload.dir || '');
-        const first = list[0];
+        // 先选游戏：默认落到第一个声明了游戏的规则集，再加载该游戏下的第一条
+        const withGame = list.find((item) => (item.games || []).length);
+        const initialGame = withGame ? withGame.games[0] : '';
+        setGame(initialGame);
+        const visible = initialGame
+          ? list.filter((item) => profileSupportsGame(item, initialGame))
+          : list;
+        const first = visible[0];
         if (first) {
           const source = first.source || {};
           if (source.log_dir) setLogPath(source.log_dir);
@@ -2058,11 +2121,14 @@ function RulesPage({ data, notify }) {
     try {
       const payload = await api('/api/rules/import', {
         method: 'POST',
-        body: JSON.stringify({ path, overwrite: true }),
+        body: JSON.stringify({ path, overwrite: true, game: game || null }),
       });
       setProfiles(payload.profiles || []);
-      notify(`已加载规则集：${payload.profile.name}`);
-      await loadProfile(payload.profile.id);
+      const imported = payload.profile;
+      // 导入成功后把游戏切到规则集支持的游戏，保证详情与列表一致
+      if ((imported.games || []).length) setGame(imported.games[0]);
+      notify(`已加载规则集：${imported.name}`);
+      await loadProfile(imported.id);
     } catch (e) {
       notify(e.message, true);
     } finally {
@@ -2134,26 +2200,40 @@ function RulesPage({ data, notify }) {
         <${Icon} name=${busy ? 'loader-2' : 'upload'} className=${busy ? 'spinner' : ''} />加载规则文件
       </button>`}
     >
+      <div class="rule-game-bar">
+        <span class="rule-game-label">游戏</span>
+        <select class="input rule-game-select" value=${game} onChange=${(e) => pickGame(e.target.value)}>
+          <option value="">全部游戏</option>
+          ${supportedGames.map((item) => html`<option value=${item.value} key=${item.value}>${item.label}</option>`)}
+        </select>
+        <span class="small muted grow">先选游戏，再加载对应的规则集；未声明游戏的规则集归为「通用」</span>
+      </div>
+
       ${profiles.length === 0
         ? html`<${EmptyState} icon="scroll-text" title="还没有规则文件" desc="点右上角加载一个 .yml 规则集，或把文件放进规则目录后刷新" />`
-        : html`<div class="profile-list">
-            ${profiles.map((item) => html`<button
-              key=${item.id}
-              class=${'profile-item' + (item.id === activeId ? ' active' : '')}
-              onClick=${() => loadProfile(item.id)}
-            >
-              <span class="profile-name">${item.name}</span>
-              <span class="profile-meta">
-                ${item.error
-                  ? html`<span class="tag tag-empty">文件有误</span>`
-                  : html`<span>${item.total} 条规则</span>`}
-              </span>
-            </button>`)}
-          </div>`}
+        : visibleProfiles.length === 0
+          ? html`<${EmptyState} icon="filter" title="该游戏还没有规则集" desc="换一个游戏，或点右上角加载支持该游戏的 .yml 规则集" />`
+          : html`<div class="profile-list">
+              ${visibleProfiles.map((item) => html`<button
+                key=${item.id}
+                class=${'profile-item' + (item.id === activeId ? ' active' : '')}
+                onClick=${() => loadProfile(item.id)}
+              >
+                <span class="profile-name">${item.name}</span>
+                <span class="profile-meta">
+                  ${item.error
+                    ? html`<span class="tag tag-empty">文件有误</span>`
+                    : html`<span>${(item.games || []).length ? item.games.map(gameLabel).join(' / ') : '通用'} · ${item.total} 条规则</span>`}
+                </span>
+              </button>`)}
+            </div>`}
 
       ${profile ? html`<div class="profile-desc">
         <div class="small">${profile.description}</div>
         <div class="profile-chips">
+          <span class="chip"><${Icon} name="gamepad-2" size=${12} />${(profile.games || []).length
+            ? profile.games.map(gameLabel).join(' / ')
+            : '通用'}</span>
           ${profile.source && profile.source.files
             ? html`<span class="chip"><${Icon} name="file-code-2" size=${12} />${profile.source.files} 份日志</span>`
             : null}

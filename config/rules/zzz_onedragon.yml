@@ -37,6 +37,9 @@ id: zzz_onedragon
 name: 绝区零一条龙（绝区零 · one_dragon）
 description: one_dragon 框架的指令级错误与应用段打转判定
 
+# 支持的游戏：取脚本配置里的游戏进程名，可写多个；留空表示通用，任何游戏都能加载。
+games: ['ZenlessZoneZero.exe']
+
 source:
   log_dir: D:\Games\Tools\ZenlessZoneZero-OneDragon\.log
   files: 4
