@@ -41,8 +41,9 @@ from script_chainer.config.script_config import (
     ScriptProcessName,
     ScriptType,
 )
-from script_chainer.services import chain_schedule
+from script_chainer.services import chain_schedule, log_rules, push_settings
 from script_chainer.services.autostart import launch_daemon_now, launch_plan_now
+from script_chainer.services.script_rules import parse_fail_fast, parse_loop
 from script_chainer.services.run_state import STATUS_LABELS, DailyRunState
 from script_chainer.services.single_instance import SingleInstanceLock
 
@@ -122,6 +123,26 @@ class NotifyPatch(BaseModel):
     enable_before_notify: bool | None = None
 
 
+class PushChannelPatch(BaseModel):
+    """单个推送渠道的字段保存。"""
+
+    values: dict[str, Any] = {}
+
+
+class PushPreferencePatch(BaseModel):
+    """推送全局偏好（发送图片 / 代理）。"""
+
+    send_image: bool | None = None
+    proxy: str | None = None
+
+
+class PushTestRequest(BaseModel):
+    """测试推送请求，channel_id 留空表示发给全部可用渠道。"""
+
+    channel_id: str | None = None
+    title: str | None = None
+
+
 class SettingsPatch(BaseModel):
     """下载源设置的部分更新。"""
 
@@ -140,6 +161,28 @@ class UpdateCheckRequest(BaseModel):
     """检查更新请求。"""
 
     channel: str = 'stable'
+
+
+class RuleImportRequest(BaseModel):
+    """导入规则文件请求。"""
+
+    path: str
+    overwrite: bool = False
+
+
+class RuleProbeRequest(BaseModel):
+    """规则试跑请求。"""
+
+    profile_id: str
+    log_path: str
+
+
+class RuleApplyRequest(BaseModel):
+    """把规则集写入某个脚本的配置。"""
+
+    profile_id: str
+    chain: str
+    index: int = 0
 
 
 class _Runtime:
@@ -259,6 +302,35 @@ def _runtime_payload() -> dict:
         }
 
 
+def _script_rule_summary(script: ScriptConfig) -> dict:
+    """脚本当前生效的日志规则摘要。
+
+    口径与运行时一致：任务级错误看 ``parse_fail_fast``（无错误正则即视为未启用），
+    打转看显式配置且未关闭，段内轮转必须要 ``runtime: true`` 才真正参与终止。
+    """
+    fail_fast_raw = script.fail_fast if isinstance(script.fail_fast, dict) else {}
+    stall_raw = script.stall if isinstance(script.stall, dict) else {}
+    loop_raw = script.loop if isinstance(script.loop, dict) else {}
+
+    fail_fast = parse_fail_fast(fail_fast_raw) if fail_fast_raw else None
+    loop = parse_loop(loop_raw) if loop_raw else None
+
+    error_on = bool(fail_fast and fail_fast.enabled)
+    stall_on = bool(stall_raw) and stall_raw.get('enabled', True) is not False
+    loop_on = bool(loop and loop.enabled)
+    # 配了 loop 但没开 runtime 或缺段正则：只用于试跑，运行时不算数
+    loop_pending = bool(loop_raw) and not loop_on
+
+    return {
+        'error': error_on,
+        'error_action': fail_fast.action if error_on else '',
+        'stall': stall_on,
+        'loop': loop_on,
+        'loop_pending': loop_pending,
+        'count': sum(1 for flag in (error_on, stall_on, loop_on) if flag),
+    }
+
+
 def _chain_summary(name: str) -> dict:
     config = ScriptChainConfig(name)
     scripts = config.script_list
@@ -267,12 +339,14 @@ def _chain_summary(name: str) -> dict:
         'script_count': len(scripts),
         'enabled_count': sum(1 for script in scripts if script.enabled),
         'invalid_count': sum(1 for script in scripts if script.invalid_message),
+        'rule_covered': sum(1 for script in scripts if _script_rule_summary(script)['count']),
         'games': sorted({script.game_display_name for script in scripts}),
     }
 
 
 def _chain_payload(name: str) -> dict:
     config = ScriptChainConfig(name)
+    run_config = RunConfig()
     scripts: list[dict] = []
     for index, script in enumerate(config.script_list):
         item = script.to_dict()
@@ -293,6 +367,12 @@ def _chain_payload(name: str) -> dict:
         'path': str(config.file_path),
         'scripts': scripts,
         'warnings': config.config_warnings(),
+        # 失败重试是整链维度的设置（config/run.yml），界面上和脚本规则一起展示
+        'retry': {
+            'max_rounds': run_config.retry_max_rounds,
+            'delay_seconds': run_config.retry_delay_seconds,
+            'only_failed': run_config.retry_only_failed,
+        },
     }
 
 
@@ -310,6 +390,7 @@ def _notify_payload() -> dict:
         'title': config.title,
         'enable_notify': config.enable_notify,
         'enable_before_notify': config.enable_before_notify,
+        'preferences': push_settings.preferences_payload(),
     }
 
 
@@ -782,6 +863,37 @@ def create_app() -> FastAPI:
             config.enable_before_notify = fields['enable_before_notify']
         return _notify_payload()
 
+    # 推送渠道：首次访问才加载 PushService（cv2 等重依赖），避免拖慢桌面壳启动
+    @app.get('/api/push/channels')
+    def get_push_channels(wait: float = 25.0) -> dict:
+        return push_settings.catalog_payload(max(0.0, min(wait, 30.0)))
+
+    @app.put('/api/push/channels/{channel_id}')
+    def update_push_channel(channel_id: str, body: PushChannelPatch) -> dict:
+        try:
+            return push_settings.save_channel(channel_id, body.values)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=f'推送渠道 {channel_id} 不存在') from exc
+        except RuntimeError as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+    @app.put('/api/push/preferences')
+    def update_push_preferences(body: PushPreferencePatch) -> dict:
+        try:
+            preferences = push_settings.save_preferences(body.send_image, body.proxy)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return {'preferences': preferences}
+
+    @app.post('/api/push/test')
+    def test_push(body: PushTestRequest | None = None) -> dict:
+        channel_id = (body.channel_id if body else '') or ''
+        title = (body.title if body else '') or ''
+        try:
+            return push_settings.test_channel(channel_id or None, title)
+        except RuntimeError as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
+
     @app.get('/api/settings')
     def get_settings() -> dict:
         return _settings_payload()
@@ -833,6 +945,77 @@ def create_app() -> FastAPI:
         if not info['can_update']:
             raise HTTPException(status_code=400, detail=info['message'])
         return _apply_update(info['target'])
+
+    # ------------------------------------------------------------------
+    # 日志规则集
+    # ------------------------------------------------------------------
+
+    @app.get('/api/rules')
+    def list_rule_profiles() -> dict:
+        return {
+            'dir': str(log_rules.rules_dir()),
+            'profiles': log_rules.list_profiles(),
+        }
+
+    @app.get('/api/rules/{profile_id}')
+    def get_rule_profile(profile_id: str) -> dict:
+        try:
+            return log_rules.get_profile(profile_id)
+        except log_rules.RuleFileError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.post('/api/rules/import')
+    def import_rule_profile(body: RuleImportRequest) -> dict:
+        try:
+            profile = log_rules.import_profile(body.path, body.overwrite)
+        except log_rules.RuleFileError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return {'profile': profile, 'profiles': log_rules.list_profiles()}
+
+    @app.post('/api/rules/probe')
+    def probe_rule_profile(body: RuleProbeRequest) -> dict:
+        try:
+            return log_rules.probe(body.profile_id, body.log_path)
+        except log_rules.RuleFileError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.post('/api/rules/apply')
+    def apply_rule_profile(body: RuleApplyRequest) -> dict:
+        """把规则集转成 fail_fast / stall / loop 写进指定脚本。"""
+        if not _chain_exists(body.chain):
+            raise HTTPException(status_code=404, detail=f'脚本链 {body.chain} 不存在')
+        try:
+            rules = log_rules.runtime_rules(body.profile_id)
+        except log_rules.RuleFileError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+        config = ScriptChainConfig(body.chain)
+        scripts = config.script_list
+        if not scripts:
+            raise HTTPException(status_code=400, detail='该脚本链还没有脚本，无法应用规则')
+        if not 0 <= body.index < len(scripts):
+            raise HTTPException(status_code=400, detail=f'脚本下标越界：{body.index}')
+
+        target = scripts[body.index]
+        target.fail_fast = rules['fail_fast']
+        target.stall = rules['stall']
+        target.loop = rules['loop']
+        config.script_list = scripts
+        config.init_idx()
+        config.save()
+        return {
+            'applied': {
+                'chain': body.chain,
+                'index': body.index,
+                'script': target.script_display_name,
+                'error_patterns': len(rules['fail_fast']['error_patterns']),
+                'ignore_patterns': len(rules['fail_fast']['ignore_patterns']),
+                'fail_fast_action': rules['fail_fast'].get('action', 'report'),
+                'loop_enabled': bool(rules['loop'].get('enabled')),
+                'loop_runtime': bool(rules['loop'].get('runtime')),
+            },
+            'chain': _chain_payload(body.chain),
+        }
 
     @app.post('/api/dialog/pick')
     def pick_dialog(body: DialogRequest) -> dict:

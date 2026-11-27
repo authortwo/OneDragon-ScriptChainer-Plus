@@ -21,9 +21,11 @@ from pathlib import Path
 from script_chainer.services.script_rules import (
     FailFastRule,
     LogRuleMonitor,
+    LoopRule,
     StallRule,
     normalize_line,
     parse_fail_fast,
+    parse_loop,
     parse_stall,
 )
 
@@ -119,19 +121,19 @@ def _extract_script_line(line: str) -> str | None:
 
 def _load_rules(
     chain: str, script_index: int | None,
-) -> tuple[FailFastRule, StallRule, str, list[str]]:
+) -> tuple[FailFastRule, StallRule, LoopRule, str, list[str]]:
     """按链配置加载规则；缺配置时回落到默认值。"""
     notes: list[str] = []
     if not chain:
         notes.append('未指定 --chain，使用默认规则（fail_fast 关闭）')
-        return FailFastRule(), StallRule(), '', notes
+        return FailFastRule(), StallRule(), LoopRule(), '', notes
 
     from script_chainer.config.script_config import ScriptChainConfig
 
     chain_config = ScriptChainConfig(chain)
     if not chain_config.is_file_exists:
         notes.append(f'脚本链 {chain} 配置不存在，使用默认规则')
-        return FailFastRule(), StallRule(), '', notes
+        return FailFastRule(), StallRule(), LoopRule(), '', notes
 
     scripts = chain_config.script_list
     target = None
@@ -145,11 +147,12 @@ def _load_rules(
 
     if target is None:
         notes.append('未指定脚本下标，使用默认规则（fail_fast 关闭）')
-        return FailFastRule(), StallRule(), '', notes
+        return FailFastRule(), StallRule(), LoopRule(), '', notes
 
     return (
         parse_fail_fast(target.fail_fast),
         parse_stall(target.stall),
+        parse_loop(target.loop),
         target.script_display_name,
         notes,
     )
@@ -161,6 +164,7 @@ def replay_log(
     script_index: int | None = None,
     fail_fast: FailFastRule | None = None,
     stall: StallRule | None = None,
+    loop: LoopRule | None = None,
 ) -> ReplayResult:
     """回放一份日志，返回判定结果。
 
@@ -170,6 +174,7 @@ def replay_log(
         script_index: 脚本下标，配合 chain 定位规则。
         fail_fast: 直接指定任务级错误规则，优先于 chain 配置。
         stall: 直接指定打转规则，优先于 chain 配置。
+        loop: 直接指定段内轮转规则，优先于 chain 配置。
 
     Returns:
         回放结果，含判定、错误首条与打转统计。
@@ -178,10 +183,13 @@ def replay_log(
     if not path.is_file():
         raise FileNotFoundError(f'日志不存在: {log_path}')
 
-    if fail_fast is None or stall is None:
-        loaded_fail_fast, loaded_stall, script_name, notes = _load_rules(chain, script_index)
+    if fail_fast is None or stall is None or loop is None:
+        loaded_fail_fast, loaded_stall, loaded_loop, script_name, notes = _load_rules(
+            chain, script_index,
+        )
         fail_fast = fail_fast if fail_fast is not None else loaded_fail_fast
         stall = stall if stall is not None else loaded_stall
+        loop = loop if loop is not None else loaded_loop
     else:
         script_name, notes = '', []
 
@@ -193,7 +201,7 @@ def replay_log(
         notes=notes,
     )
 
-    monitor = LogRuleMonitor(fail_fast, stall)
+    monitor = LogRuleMonitor(fail_fast, stall, loop)
     counts: dict[str, deque[float]] = {}
     last_ts: float | None = None
     base_ts: float | None = None
@@ -216,6 +224,13 @@ def replay_log(
             last_ts = relative
 
             monitor.feed(text, now=relative)
+            # 逐行检查，回放才能在「过了宽限期的那一刻」给出判定，
+            # 而不是等到日志末尾 —— 否则 loop 的终止时刻会被推迟到最后一秒
+            if result.verdict == 'ok':
+                violation = monitor.check(now=relative)
+                if violation is not None:
+                    result.verdict = violation.reason
+                    result.reason = violation.summary
 
             key = normalize_line(text)
             if not key:
@@ -226,12 +241,14 @@ def replay_log(
             while stamps and stamps[0] < cutoff:
                 stamps.popleft()
 
-    if last_ts is not None:
+    if last_ts is not None and result.verdict == 'ok':
         violation = monitor.check(now=last_ts)
         if violation is not None:
             result.verdict = violation.reason
             result.reason = violation.summary
     result.first_error = monitor.first_error
+    for notice in monitor.drain_notices():
+        result.notes.append(f'登记（未终止）：{notice.summary}')
 
     top: list[StallStat] = []
     for key, stamps in counts.items():

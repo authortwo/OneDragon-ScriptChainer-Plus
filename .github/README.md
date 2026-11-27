@@ -63,7 +63,8 @@ OneDragon ScriptChainer Plus 是基于 OneDragon 框架的脚本链工具：把�
 | 脚本链 | 新建/删除链，增删脚本、排序、启用开关；编辑路径、游戏进程、完成判定、超时、启动器模式、日志规则等 |
 | 周计划 | 周一到周日 + 默认列表多选，保存后写入 `config/run.yml` 的 `schedule` |
 | 运行策略 | 时间窗、全局截止、轮询间隔、每日一次、锁屏处理、重试、保持唤醒、关机、账户校验、开机自启 |
-| 消息推送 | 通知标题、启用推送、脚本开始/结束通知、日志推送间隔 |
+| 消息推送 | 通知标题与总开关、启动前通知、附带截图、网络代理；24 个推送渠道（企业微信、钉钉、飞书、SMTP、Webhook 等）可视化配置、单独测试与全部测试 |
+| 日志规则 | 内置 BetterGI（原神）、MAA（崩坏3）、绝区零一条龙三套规则集，可加载自定义 `.yml`；对真实日志试跑看每条规则的命中与样例，判定卡死打转（同行高频重复 + 段内原地轮转），再一键写入脚本配置，两者都能参与运行时终止 |
 | 设置 | 代码源与资源下载源、检查更新、运行环境信息 |
 | 运行报告 | 最近一次运行的汇总、脚本明细、文本报告与日志尾部 |
 
@@ -110,6 +111,7 @@ schedule:                    # 星期 -> 脚本链列表
 ```yaml
 fail_fast:                    # 任务级错误识别
   enabled: true
+  action: report              # report 只登记继续跑（默认）；stop_task 终止当前脚本
   grace_seconds: 240          # 命中后宽限时间，期间自行恢复则不算失败
   error_patterns:
     - "\\[ERROR\\]\\[task_flow\\.py\\]"
@@ -120,12 +122,24 @@ stall:                        # 卡死 / 原地打转检测
   window_minutes: 8
   min_repeats: 200
   ignore_pattern: "DEBUG"
+  ignore_levels: ["DBG", "TRC"]   # 这些级别的刷屏不计入重复
   grace_seconds: 60
+loop:                         # 段内原地轮转（可选）
+  runtime: true               # 显式开启才参与运行时终止
+  segment_start: "task start:"
+  segment_end: "task end:"
+  step_pattern: 'name":"([^"]+)"'
+  min_iterations: 200
+  max_progress: 8
+  same_state_repeats: 90
 no_log_timeout_seconds: 300   # 无日志超时（不允许关闭，0 回落 300）
 no_log_max_retries: 3         # 无日志超时后的重试次数
 ```
 
-命中错误或打转后先等待宽限期，仍未恢复才终止脚本并判失败。整链结束后按 `retry` 配置只重跑失败的脚本。
+`action: report` 时命中只登记、脚本继续跑，登记项写进运行报告；`stop_task` 才会终止脚本。
+打转（stall / loop）命中后同样先等宽限期，仍未恢复才终止。整链结束后按 `retry` 配置只重跑失败的脚本。
+
+规则也可以不碰 YAML：脚本「高级」页有「规则来源」下拉，选一套规则集一键填入，再按需改阈值或动作。
 
 ## 📊 运行报告
 

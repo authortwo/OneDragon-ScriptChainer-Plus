@@ -1,0 +1,265 @@
+# ============================================================================
+# Maa_bbb 日志规则集 · 崩坏3（MAA / MaaFW 框架）
+#
+# 依据：D:\Games\Tools\Maa_bbb\debug 下 21 份 maafw 日志（2026-11-10 ~ 2026-11-26），
+#       共 2,064,092 条记录：INF 925,536 / DBG 821,371 / TRC 274,228 / WRN 42,712 / ERR 77。
+#       注意 ERR 只有 77 条 —— MAA 的失败大多不是 ERR，而是 task end [ret=false]
+#       和 WRN 级的 PipelineTask 报错，所以规则不能按日志级别筛，要看事件语义。
+#
+# 两类规则：
+#   rules[*].level = fatal/task  → 任务级错误，运行时命中即判失败
+#   stall / loop                 → 卡死打转，按同一行频率与同节点连续次数判定
+#
+# 用法（界面「日志规则」页）：
+#   1. 加载本文件 → 选日志目录试跑，看每条规则的真实命中与样例；
+#   2. 点「应用到脚本」→ 把 fail_fast / stall 写进脚本链的脚本配置，运行时生效。
+# ============================================================================
+
+version: 1
+id: maa_bbb
+name: MAA（崩坏3 · 崩坏3一条龙）
+description: MaaFW 框架的任务级错误与卡死打转判定
+
+source:
+  log_dir: D:\Games\Tools\Maa_bbb\debug
+  files: 21
+  records: 2064092
+  err: 77
+  wrn: 42712
+
+# ---------------------------------------------------------------------------
+# 试跑取样：同目录还有 gui.log（Python 排版）、updater.log、crash.log，
+# 只挑框架日志，避免混读导致记录数虚高、正则全部落空。
+# ---------------------------------------------------------------------------
+probe:
+  include: ['maafw*.log']
+  max_files: 6
+
+# ---------------------------------------------------------------------------
+# 运行时参数：写进脚本配置的 fail_fast 段
+# error_patterns 不手写，全部由 level=fatal/task 的规则自动汇总
+# ---------------------------------------------------------------------------
+fail_fast:
+  enabled: true
+  # 只登记、不终止。MAA 一条 task 失败（体力不足、关卡未解锁）后面还有别的
+  # task 能做，直接杀进程等于放弃整轮。登记项会写进运行报告。
+  # 想恢复「命中即终止」改成 stop_task。
+  action: report
+  # MAA 单节点识别超时是 20 秒（pretask.reco_timeout=20000ms），超时后还要走
+  # bad next → invalid node → 截图 → task end，整条链约 0.03 秒落地但前摇很长。
+  # 给 60 秒宽限：中途换节点重试成功的轮次不会被误杀。
+  grace_seconds: 60
+
+# ---------------------------------------------------------------------------
+# 运行时参数：写进脚本配置的 stall 段（同一行反复出现 = 原地打转）
+#
+# MAA 的日志噪音极高：单次运行里「cache is empty」能刷 2.6 万条（见 11.15 那份），
+# DBG/TRC 更是占八成（sleep 200ms、| leave 120ms 这类纯耗时行）。
+# 因此两级过滤：
+#   1. ignore_levels 直接不看 DBG/TRC —— 这两级是框架内部追踪，不代表界面进展；
+#   2. ignore 规则把剩下的高频噪音（cache is empty / OCR 尺寸不符 / 输入转储）排掉。
+#
+# 阈值 900 是实测出来的：过滤完噪音后，正常战斗轮 3 分钟内最高 438 次
+# （超弦空间-切人-乱打战斗逻辑 反复识别），而 40 分钟登录循环那份只有 548 次
+# —— 两者的行频本来就分不开，同行重复在 MAA 上只能当「极端刷屏」兜底。
+# 因此本规则集的卡死判定以 loop（同节点连续次数）为准，stall 只防呆。
+# ---------------------------------------------------------------------------
+stall:
+  enabled: true
+  window_minutes: 3
+  min_repeats: 900
+  ignore_levels: ['DBG', 'TRC']
+  grace_seconds: 60
+
+# ---------------------------------------------------------------------------
+# 增强判定：同一任务段内原地打转（试跑诊断用，暂不参与运行时终止）
+#
+# MAA 没有「状态机迭代」这种自述，但有两件事等价：
+#   段 = task start → task end
+#   步进 = Node.PipelineNode.Starting 的节点名
+# 实测 399 个任务段：正常任务段最多 84 次连续同一节点；而真正的打转是
+#   家园远征-体力不足提示 ×5360（56 分钟没退出）、启动并进入游戏 ×1758（40 分钟登录循环）
+# 因此连续 90 次即可判死；再用「段内步进 ≥200 且不同节点数 ≤8」兜住整段轮转。
+# ---------------------------------------------------------------------------
+loop:
+  enabled: true
+  segment_start: 'task start:'
+  segment_end: 'task end:'
+  # 只取 details 里第一个 "name"，就是当前执行的节点名
+  step_pattern: '\[msg=Node\.PipelineNode\.Starting\] \[details=\{.*?"name":"([^"]+)"'
+  # 留空 = 不用「推进事件」计数，改用段内不同节点数当推进量
+  progress_pattern: ''
+  min_iterations: 200
+  max_progress: 8
+  same_state_repeats: 90
+  # MAA 的病态形态就是「一段永不结束」，所以 loop 必须参与运行时终止：
+  # 卡住的段不会打 task end，只靠 stall 要等同一行刷到 900 次才动。
+  # 命中后给 60 秒，段内出现新节点（推进）就撤销，否则终止。
+  runtime: true
+  grace_seconds: 60
+
+# ---------------------------------------------------------------------------
+# 规则表
+#   level:  fatal（环境级，整轮无效）/ task（单个任务失败）/ ignore（噪音，不算错）
+#   action: stop_chain（终止整条链）/ stop_task（跳过当前任务）/ continue（放行）
+# ---------------------------------------------------------------------------
+rules:
+  # ===== fatal：设备/画面已经拿不到了，后面每个任务都会同样失败 =====
+  - id: env.device-lost
+    name: 截图失联（游戏窗口丢失）
+    level: fatal
+    action: stop_chain
+    match: '(?:controller screencap failed|failed to screencap|GetDC failed)'
+    hits: 75
+    hint: >-
+      21 份日志里 75 次，全部出现在一次运行的末尾：游戏被关掉或最小化到无法截图。
+      运行时偶发一次还能靠 60 秒宽限自愈；连续命中就是设备真的没了，继续跑只会空转。
+
+  # ===== task：单个任务失败，跳过它继续下一个 =====
+  - id: task.end-failed
+    name: 任务返回失败
+    level: task
+    action: stop_task
+    match: 'task end:.*\[ret=false\]'
+    hits: 24
+    hint: >-
+      主判据。日志里 ret=false 与随后的 Tasker.Task.Failed 一一对应，
+      且同一行就带 entry 名（任务奖励领取/冒险委托任务/家园远征/日常活跃）。
+      实测 24 次失败全部由「节点识别超时」引起。
+
+  - id: task.node-timeout
+    name: 节点识别超时
+    level: task
+    action: stop_task
+    match: 'Task timeout \[pretask\.name='
+    hits: 24
+    hint: >-
+      某个识别节点耗满 20 秒仍认不出（日志后面紧跟 PipelineTask bad next）。
+      高发节点：日常活跃-奖励检查-点击领取后领取失败（6 次）、辅助显示关闭-未关闭辅助菜单显示（4 次）。
+      通常是界面停在弹窗/加载中，或识别素材与当前版本不匹配。
+
+  - id: task.invalid-node
+    name: 节点跳转失败
+    level: task
+    action: stop_task
+    match: 'invalid node id, handle error'
+    hits: 24
+    hint: >-
+      超时后 next 列表没解析出可执行节点，pipeline 直接报错退出该任务。
+      同一行带 node.name，可直接定位是哪个节点写错了 next。
+
+  - id: task.node-failed
+    name: 节点执行失败
+    level: task
+    action: stop_task
+    match: '\[msg=Node\.PipelineNode\.Failed\]'
+    hits: 25
+    hint: >-
+      节点级失败事件，details 里带节点名与失败原因（focus）。
+      与上面三条成组出现，用来在 UI 上确认「失败发生在哪个节点」。
+
+  - id: task.on-error-snapshot
+    name: 自动保存错误截图
+    level: task
+    action: stop_task
+    match: 'save on error to'
+    hits: 24
+    hint: >-
+      MAA 自己在失败时落盘到 debug/on_error/*.png。
+      命中即说明这一轮必定失败，可以直接去看截图里停在哪一屏。
+
+  # ===== ignore：高频噪音，不算错，但必须从打转统计里排掉 =====
+  - id: noise.ocr-cache
+    name: OCR 批缓存为空
+    level: ignore
+    action: continue
+    match: 'cache is empty'
+    hits: 41559
+    hint: >-
+      OCRer::handle_cached 在批量 OCR 缓存没命中时打一行，属正常路径。
+      单次运行可刷 2.6 万条（11.15 那份），是打转误判的头号来源，必须忽略。
+
+  - id: noise.timing-tick
+    name: 耗时记录行
+    level: ignore
+    action: continue
+    match: '\d+ms\s*$'
+    hits: 298979
+    hint: >-
+      TaskBase::sleep 每 200 毫秒一行「200ms」，加上「| leave, 120ms」的耗时行，
+      去掉数字后整段日志只有这一种，3 分钟窗口能堆到几千条。
+      不排掉的话打转判定永远误报（实测误报 8558 次/3 分钟）。
+
+  - id: noise.io-dump
+    name: 输入/识别转储行
+    level: ignore
+    action: continue
+    match: '(?:\[key=\d+\]|\[config_\.mode=|\[results=\[\{|\[rois=|\[prefetch_batch_ocr)'
+    hits: 125492
+    hint: >-
+      点击参数、按键、模板匹配全量结果、ROI、批量 OCR 预取的调试转储。
+      正常运行的 3 分钟窗口里这类行也能重复上千次（实测正常轮 1110~3980 次），
+      不排掉的话 stall 永远触发，等于没有判定。
+
+  - id: noise.ocr-size
+    name: OCR 结果尺寸不匹配
+    level: ignore
+    action: continue
+    match: 'Wrong ocr_result size'
+    hits: 921
+    hint: >-
+      识别框数与文本数不一致（多为空文本），框架内部丢弃该结果继续跑，不影响任务。
+
+  - id: noise.empty-image
+    name: 空图像跳过 ROI 校正
+    level: ignore
+    action: continue
+    match: 'image is empty'
+    hits: 477
+    hint: 直连点击类节点没有截图时的正常分支。
+
+  - id: noise.manual-stop
+    name: 手动停止任务
+    level: ignore
+    action: continue
+    match: 'need_to_stop \[node\.name='
+    hits: 69
+    hint: 用户点了停止，或调度器要求退出当前任务，不是失败。
+
+  - id: noise.gpu-adapter
+    name: 虚拟/基础显卡被跳过
+    level: ignore
+    action: continue
+    match: '(?:virtual adapters|software adapter|adapter has less than \d+GB video memory)'
+    hits: 8
+    hint: 设备枚举阶段跳过 Microsoft Basic Render Driver / 虚拟显卡，正常。
+
+  - id: noise.non-json-entry
+    name: 资源目录含非 JSON 文件
+    level: ignore
+    action: continue
+    match: 'entry is not \*\.json or \*\.jsonc, skip'
+    hits: 37
+    hint: >-
+      resource/base/pipeline 下有没写扩展名的自定义配置（如「往世乐土/周常乐土/…」），
+      框架跳过不加载。想让自定义流程生效，把文件补成 .json 或改成目录。
+
+  - id: info.missing-node
+    name: 节点定义缺失
+    level: ignore
+    action: continue
+    match: 'task not found \[node_name='
+    hits: 19
+    hint: >-
+      实测全部是 custom通知 —— 任务里写了自定义通知动作但没定义该节点，
+      不影响流程，只是通知发不出去。要修就补 <任务>.custom.json 里的节点。
+
+  - id: info.empty-rect
+    name: 自定义动作目标区域为空
+    level: ignore
+    action: continue
+    match: 'custom action target rect is empty'
+    hits: 19
+    hint: >-
+      实测是「准备退出 → Notice」这个自定义动作没给 rect，框架用空区域继续执行。
+      不影响任务，但这条通知等于没发。

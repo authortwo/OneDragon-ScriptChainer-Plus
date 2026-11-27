@@ -53,6 +53,7 @@ class ScriptRecord:
     end_reason: str
     error_summary: str
     retry_round: int
+    warnings: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict:
         return {
@@ -66,6 +67,7 @@ class ScriptRecord:
             'end_reason': self.end_reason,
             'error_summary': self.error_summary,
             'retry_round': self.retry_round,
+            'warnings': self.warnings,
         }
 
 
@@ -158,6 +160,7 @@ class RunReporter:
             end_reason=outcome.end_reason,
             error_summary=outcome.error_summary,
             retry_round=outcome.retry_round,
+            warnings=list(outcome.warnings),
         )
         self.records.append(record)
         self._emit({'event': 'script_end', 'chain': self.chain_name, **record.to_dict()})
@@ -207,6 +210,7 @@ class RunReporter:
             end_reason=outcome.end_reason,
             error_summary=outcome.error_summary,
             retry_round=outcome.retry_round,
+            warnings=list(outcome.warnings),
         )
         if target is not None:
             self.records[self.records.index(target)] = record
@@ -371,6 +375,8 @@ def build_chain_text(report: dict) -> str:
             detail += f' 第{record["retry_round"]}轮重跑'
         if not run_verdict.is_ok(verdict) and record.get('error_summary'):
             detail += f'：{record["error_summary"]}'
+        elif record.get('warnings'):
+            detail += f'；登记 {len(record["warnings"])} 条任务级错误（未终止）'
         lines.append(detail)
 
     if report.get('deadline_hit'):

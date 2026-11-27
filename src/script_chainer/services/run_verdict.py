@@ -7,7 +7,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 OK = 'ok'
 FAIL = 'fail'
@@ -43,12 +43,14 @@ class ScriptOutcome:
         end_reason: 结束原因（check_done/timeout/no_log/deadline/crash 等）。
         error_summary: 首条错误摘要，便于报告直接展示。
         retry_round: 第几轮重试产生的结果，0 表示首轮。
+        warnings: 只登记、未终止的提示（如任务级错误按 report 动作放行）。
     """
 
     verdict: str
     end_reason: str = ''
     error_summary: str = ''
     retry_round: int = 0
+    warnings: list[str] = field(default_factory=list)
 
 
 def is_ok(verdict: str) -> bool:

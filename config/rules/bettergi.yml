@@ -1,0 +1,297 @@
+# ============================================================================
+# BetterGI 日志规则集 · 原神一条龙
+#
+# 依据：D:\Games\Tools\BetterGI\log 下 18 份日志（2026-11-09 ~ 2026-11-26），
+#       共 12,899 条记录，其中 ERR 1,075 条、WRN 1,347 条。
+#       每条规则的 hits 是这批日志里的实测命中数，可作为「该不该留」的参考。
+#
+# 两类规则：
+#   rules[*].level = fatal/task  → 任务级错误，运行时命中即判失败
+#   stall / loop                 → 卡死打转，按频率与状态机进展判定
+#
+# 用法（界面「日志规则」页）：
+#   1. 加载本文件 → 可对任意日志目录试跑，看到每条规则的真实命中与样例；
+#   2. 点「应用到脚本」→ 把 fail_fast / stall 写进脚本链的脚本配置，运行时生效。
+# ============================================================================
+
+version: 1
+id: bettergi
+name: BetterGI（原神）
+description: 一条龙脚本的任务级错误与卡死打转判定
+
+source:
+  log_dir: D:\Games\Tools\BetterGI\log
+  files: 18
+  records: 12899
+  err: 1075
+  wrn: 1347
+
+# ---------------------------------------------------------------------------
+# 运行时参数：会被原样写进脚本配置的 fail_fast 段
+# error_patterns 不在这里手写，由 level=fatal/task 的规则自动汇总，避免两份不一致
+# ---------------------------------------------------------------------------
+fail_fast:
+  enabled: true
+  # 命中后只登记、不终止：BetterGI 的日常任务彼此独立，一条失败不该让后面的
+  # 周本、派遣白等一整轮。登记的条目会写进运行报告。
+  # 想恢复「命中即终止」改成 stop_task。
+  action: report
+  # 命中错误后先宽限 45 秒再判死。BetterGI 的降级登录链路常在 30 秒内自愈
+  # （enterGame 失败 → 改账号密码登录），过早终止会误杀本来能恢复的轮次。
+  grace_seconds: 45
+
+# ---------------------------------------------------------------------------
+# 运行时参数：写进脚本配置的 stall 段（同一行反复出现 = 原地打转）
+#
+# 实测依据：「第 N 次尝试未识别到当前状态，1秒后重试...」在打转时每秒 1 条，
+#           1121 那份日志连续刷了 30 条；而正常轮次里这条只出现 1 次，
+#           偶发失败也就 4~6 次。取 2 分钟 18 次，既能抓住真打转又不会误判重试。
+# ---------------------------------------------------------------------------
+stall:
+  enabled: true
+  window_minutes: 2
+  min_repeats: 18
+  # 运行时喂进来的是整行原文（`[00:00:01.000] [DBG] [线程] Logger`），
+  # 不能用 ^ 锚定行首，否则这条过滤永远不生效
+  ignore_pattern: '\[DBG\]'
+  grace_seconds: 30
+
+# ---------------------------------------------------------------------------
+# 增强判定：状态机原地轮转（试跑时判定，用于诊断；不影响运行时终止）
+# 实测：单次状态机运行平均 3.4 次迭代、最多 9 次；同一状态连续出现最多 5 次。
+# ---------------------------------------------------------------------------
+loop:
+  enabled: true
+  # 按单次「状态机启动 → 完成」分段判定，不跨段平均。
+  # 实测 39 段：(1迭代,1转换)×18、(7,6)×13、(2,2)×6、(9,3)×1，正常段推进与迭代基本 1:1；
+  # (9,3) 是唯一「迭代多、转换少」的样本，故阈值取 8 / 3。
+  min_iterations: 8
+  max_progress: 3
+  # 同一状态连续出现 ≥ 3 次即可疑（实测最多出现过 DifficultySelect ×5）
+  same_state_repeats: 3
+  # 只用于试跑：8 / 3 / 3 是按 39 段样本校出来的诊断口径，直接拿去终止会误杀
+  # —— 正常轮次里同一状态也能连续出现 5 次。BetterGI 的终止仍由 stall 负责。
+  # 想让它参与终止：runtime 改 true，并把阈值放大到 20 / 2 / 8 量级再观察一段。
+  runtime: false
+  grace_seconds: 60
+
+# ---------------------------------------------------------------------------
+# 规则表
+#   level:  fatal（环境级，整轮无效）/ task（单个任务失败）/ ignore（噪音，不算错）
+#   action: stop_chain（终止整条链）/ stop_task（跳过当前任务）/ continue（放行）
+# ---------------------------------------------------------------------------
+rules:
+  # ===== fatal：环境或调度已经坏了，再跑下去每个任务都会失败 =====
+  - id: env.input-blocked
+    name: 模拟键鼠被拦截
+    level: fatal
+    action: stop_chain
+    match: '模拟键鼠消息发送失败'
+    hits: 784
+    hint: 以管理员身份运行 BetterGI；关闭 360/电脑管家对模拟输入的拦截。未解决前每条任务都会空转 30 秒后失败。
+
+  - id: sched.task-overlap
+    name: 任务重复启动冲突
+    level: fatal
+    action: stop_chain
+    match: '当前存在正在运行中的独立任务，请不要重复执行任务'
+    hits: 172
+    hint: 已有任务在跑又发起了新的独立任务。链式调度时上一个任务没真正退出，需确认上一脚本已结束再启动下一个。
+
+  - id: account.empty-credential
+    name: 账号或密码为空
+    level: fatal
+    action: stop_chain
+    match: '账号或密码为空，无法使用账号密码方式登录'
+    hits: 26
+    hint: 降级到账号密码登录时没有可用凭据。补全密码或改用账号图片切换。
+
+  - id: runtime.cts-disposed
+    name: 取消令牌已释放
+    level: fatal
+    action: stop_chain
+    match: 'CancellationTokenSource has been disposed'
+    hits: 1
+    hint: 任务上下文已被销毁仍在回调，通常是上一轮被强杀后的残留，重启 BetterGI 再跑。
+
+  - id: battle.no-script
+    name: 未匹配到战斗脚本
+    level: fatal
+    action: stop_chain
+    match: '未匹配到任何战斗脚本'
+    hits: 8
+    hint: 战斗策略没匹配上（角色/队伍识别失败）。检查战斗脚本配置与当前队伍。
+
+  # ===== task：单个任务失败，跳过它继续下一个 =====
+  - id: state.unknown-exhausted
+    name: 状态识别次数耗尽
+    level: task
+    action: stop_task
+    match: '经过 \d+ 次尝试仍无法识别当前状态'
+    hits: 24
+    hint: 连续 30 次（约 30 秒）都认不出界面。多为界面卡在弹窗、加载中或输入被拦截。
+
+  - id: state.stop-switching
+    name: 停止状态切换
+    level: task
+    action: stop_task
+    match: '无法识别当前状态，停止状态切换'
+    hits: 24
+    hint: 状态机已放弃。与上一条通常成对出现，只需判定一次。
+
+  - id: state.retry-limit
+    name: 状态重试超上限
+    level: task
+    action: stop_task
+    match: '已连续尝试 \d+ 次，超过最大限制'
+    hits: 4
+    hint: 某个状态反复尝试仍过不去，检查该状态的前置界面是否被遮挡。
+
+  - id: state.possible-loop
+    name: 疑似状态循环
+    level: task
+    action: stop_task
+    match: '可能陷入状态循环'
+    hits: 4
+    hint: 状态之间来回跳。检查状态配置或界面是否有未关闭的对话框。
+
+  - id: task.exception
+    name: 任务执行异常
+    level: task
+    action: stop_task
+    match: '执行异常[：:]'
+    hits: 5
+    hint: 通用任务异常前缀，命中时看后半段的具体原因。
+
+  - id: task.failed
+    name: 任务执行失败
+    level: task
+    action: stop_task
+    match: '执行失败[：:]'
+    hits: 10
+    hint: 自动地脉花/自动秘境等的失败前缀，后半段通常带「导航失败」「超时」。
+
+  - id: craft.no-dialog
+    name: 未进入合成台对话
+    level: task
+    action: stop_task
+    match: '未进入和合成台交互对话界面'
+    hits: 3
+    hint: 走到合成台但没弹出交互框，多为站位偏差或被其他界面遮挡。
+
+  - id: leylin.nav-timeout
+    name: 地脉花导航超时
+    level: task
+    action: stop_task
+    match: '导航到地脉花失败'
+    hits: 6
+    hint: 走到点位后既没检测到奖励也没检测到交互文字，路线点可能失效。
+
+  - id: bag.menu-missing
+    name: 背包菜单找不到
+    level: task
+    action: stop_task
+    match: '未找到背包中.*菜单按钮'
+    hits: 1
+    hint: 背包界面结构与识别素材不匹配，多为版本更新后素材过期。
+
+  - id: bag.salvage-missing
+    name: 圣遗物分解按钮缺失
+    level: task
+    action: stop_task
+    match: '未找到圣遗物分解按钮'
+    hits: 7
+    hint: 同「背包菜单找不到」，优先检查素材版本。
+
+  - id: domain.entrance-menu
+    name: 秘境入口菜单未确认
+    level: task
+    action: stop_task
+    match: '未确认秘境入口菜单'
+    hits: 1
+    hint: 培养任务在入口处没确认成功，通常紧跟在状态重试超限之后。
+
+  - id: ui.back-to-main-failed
+    name: 未能返回主界面
+    level: task
+    action: stop_task
+    match: '未能返回主界面'
+    hits: 3
+    hint: 退出流程被打断，常见于弹窗未关或传送未完成。
+
+  - id: teleport.region-failed
+    name: 切换区域失败
+    level: task
+    action: stop_task
+    match: '切换区域\[[^\]]+\]失败'
+    hits: 2
+    hint: 跨区域传送失败，检查锚点是否解锁、网络是否稳定。
+
+  - id: teleport.too-slow
+    name: 单次传送超时
+    level: task
+    action: stop_task
+    match: '单次传送超过'
+    hits: 2
+    hint: 传送卡住超过阈值，多为网络或加载慢；偶发可忽略，连续出现要查网络。
+
+  - id: script.exception
+    name: 脚本执行异常
+    level: task
+    action: stop_task
+    match: '执行脚本时发生异常'
+    hits: 4
+    hint: JS 脚本内部抛错，看堆栈定位到具体语句。
+
+  # ===== ignore：高频但不是错误，命中不计失败 =====
+  - id: noise.js-notify-blocked
+    name: JS 通知被拦截
+    level: ignore
+    action: continue
+    match: 'JS 通知关闭，消息被拦截'
+    hits: 53
+    hint: 通知开关关闭后的正常回显，不是故障。
+
+  - id: noise.skill-cd
+    name: 战技 CD 未更新
+    level: ignore
+    action: continue
+    match: '战技cd未更新'
+    hits: 48
+    hint: 战斗过程中技能识别抖动，下一帧会自愈。
+
+  - id: noise.screenshot-fail
+    name: 截图失败
+    level: ignore
+    action: continue
+    match: '截图失败'
+    hits: 12
+    hint: 抓帧偶发失败，单次无影响。
+
+  - id: noise.focus-lost
+    name: 窗口失焦暂停
+    level: ignore
+    action: continue
+    match: '当前获取焦点的窗口为'
+    hits: 235
+    hint: 用户切走了窗口导致暂停，属于预期行为；若无人操作却频繁出现，检查是否有程序抢焦点。
+
+  - id: noise.affinity-party
+    name: 切换好感队失败
+    level: ignore
+    action: continue
+    match: '切换好感队失败'
+    hits: 13
+    hint: 好感队切换失败不影响主流程，下一轮会重试。
+
+  - id: noise.ocr-empty-slot
+    name: 角色栏位 OCR 为空
+    level: ignore
+    action: continue
+    match: 'OCR识别第\d位角色，结果""'
+    hits: 32
+    hint: 出战角色栏未识别到文字，属战斗中的识别抖动；高频连续出现时由 stall 兜底。
+
+# 注：BetterGI 的级别在每条记录的头部（[DBG]/[INF]/[ERR]），消息体内不含级别前缀，
+#     因此这里不设「匹配 DBG」的规则 —— 靠级别过滤即可。stall.ignore_pattern 保留
+#     ^\[DBG\] 是为了兼容脚本 stdout 自带级别前缀的情况。

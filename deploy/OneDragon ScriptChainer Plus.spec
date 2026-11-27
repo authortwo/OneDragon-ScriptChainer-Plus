@@ -8,6 +8,8 @@ a = Analysis(
     datas=[
         ('../config/project.yml', 'resources/config'),
         ('../config/repository.yml', 'resources/config'),
+        # 内置日志规则集（任务级错误 / 卡死打转），首次运行即可加载
+        ('../config/rules', 'resources/config/rules'),
         ('../assets', 'resources/assets'),
         ('../src/script_chainer/webui/web', 'script_chainer/webui/web'),
     ],

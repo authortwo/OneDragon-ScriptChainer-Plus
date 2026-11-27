@@ -10,7 +10,7 @@ import threading
 import time
 from collections.abc import Callable
 from contextlib import suppress
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path, PurePath
 from typing import TextIO
 
@@ -33,7 +33,12 @@ from script_chainer.services.single_instance import SingleInstanceLock
 from script_chainer.services.keep_awake import KeepAwake
 from script_chainer.services.log_notifier import LogNotifier
 from script_chainer.services.run_reporter import RunReporter
-from script_chainer.services.script_rules import LogRuleMonitor, parse_fail_fast, parse_stall
+from script_chainer.services.script_rules import (
+    LogRuleMonitor,
+    parse_fail_fast,
+    parse_loop,
+    parse_stall,
+)
 from script_chainer.services.process_manager import (
     LauncherExitError,
     ProcessInfo,
@@ -104,6 +109,8 @@ class _RunMonitorState:
     game_ever_existed: bool = False
     last_log_time: float | None = None
     first_error: str = ''
+    warnings: list[str] = field(default_factory=list)
+    """按 ``fail_fast.action=report`` 只登记、未终止的命中。"""
 
 
 class _TeeWriter:
@@ -220,7 +227,8 @@ def print_message(message: str, level="INFO"):
     # 打印消息，带有时间戳和日志级别
     _exit_controller.wait(0.1)
     timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S,%f")[:-3]
-    colors = {"INFO": Fore.CYAN, "ERROR": Fore.YELLOW + Style.BRIGHT, "PASS": Fore.GREEN}
+    colors = {"INFO": Fore.CYAN, "ERROR": Fore.YELLOW + Style.BRIGHT, "PASS": Fore.GREEN,
+              "WARN": Fore.MAGENTA}
     color = colors.get(level, Fore.WHITE)
     print(f"{timestamp} | {color}{level}{Style.RESET_ALL} | {message}")
     log.info(message)
@@ -563,9 +571,16 @@ def _monitor_script_done(
             )
 
         if is_done:
+            if state.warnings:
+                print_message(
+                    f'本轮共登记 {len(state.warnings)} 条任务级错误，未终止：'
+                    f'{state.warnings[0][:160]}',
+                    level='WARN',
+                )
             return run_verdict.ScriptOutcome(
                 run_verdict.OK,
                 end_reason=run_verdict.END_REASON_CHECK_DONE,
+                warnings=list(state.warnings),
             )
 
         # 全局截止时间检查：到点后终止当前脚本，不再启动后续脚本
@@ -598,6 +613,13 @@ def _monitor_script_done(
                     level='ERROR',
                 )
                 raise _RuleViolationError(violation.reason, violation.summary)
+            # report 动作下的登记项：打一条 WARN 后继续跑，结束时汇总进报告
+            for notice in rules.drain_notices():
+                print_message(
+                    f'{notice.text}，按配置继续运行 {script_config.script_display_name}',
+                    level='WARN',
+                )
+                state.warnings.append(notice.summary)
 
         if _exit_controller.wait(1):
             # 已请求退出（控制台关闭 / Ctrl+C），由信号处理流程善后
@@ -719,6 +741,7 @@ def _run_script_once(
     rules = LogRuleMonitor(
         parse_fail_fast(script_config.fail_fast),
         parse_stall(script_config.stall),
+        parse_loop(script_config.loop),
     )
     pm = _launch_script(script_config, target_process_infos, log_notifier, state, rules)
     _active_pm = pm
@@ -765,6 +788,8 @@ def _run_script_once(
         _cleanup_processes(script_config, pm)
         if not outcome.error_summary:
             outcome.error_summary = state.first_error
+        if not outcome.warnings and state.warnings:
+            outcome.warnings = list(state.warnings)
         return outcome
     finally:
         _active_pm = None

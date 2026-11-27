@@ -174,6 +174,7 @@ class ScriptConfig:
     no_log_max_retries: int = 3
     fail_fast: dict = field(default_factory=dict)
     stall: dict = field(default_factory=dict)
+    loop: dict = field(default_factory=dict)
 
     # 不参与序列化的元数据
     idx: int = field(default=0, repr=False, compare=False)
@@ -201,6 +202,8 @@ class ScriptConfig:
             self.fail_fast = {}
         if not isinstance(self.stall, dict):
             self.stall = {}
+        if not isinstance(self.loop, dict):
+            self.loop = {}
 
     def to_dict(self) -> dict:
         """序列化为字典（排除 idx 与空规则，避免污染配置文件）。"""
@@ -210,6 +213,8 @@ class ScriptConfig:
             d.pop('fail_fast', None)
         if not d.get('stall'):
             d.pop('stall', None)
+        if not d.get('loop'):
+            d.pop('loop', None)
         return d
 
     @classmethod
